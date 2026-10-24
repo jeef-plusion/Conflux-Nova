@@ -19,7 +19,7 @@ void upload(std::ifstream& f, const GgufFile& g, const TensorInfo& t, void* dst,
         const size_t n = (size_t)(left > cap ? cap : left);
         f.read(pin, (std::streamsize)n);
         if (!f) NOVA_ABORT("short read while uploading weights");
-        cudaMemcpy((char*)dst + off, pin, n, cudaMemcpyHostToDevice);
+        NOVA_CU(cudaMemcpy((char*)dst + off, pin, n, cudaMemcpyHostToDevice));
         off += n;
         left -= n;
     }
@@ -46,7 +46,8 @@ void Engine::load(const std::string& path) {
     if (!f) NOVA_ABORT("cannot reopen model");
     const size_t kPin = 32u << 20;
     char* pin = nullptr;
-    cudaHostAlloc((void**)&pin, kPin, cudaHostAllocDefault);
+    NOVA_CU(cudaHostAlloc((void**)&pin, kPin, cudaHostAllocDefault));
+    if (!pin) NOVA_ABORT("cudaHostAlloc returned null");
 
     auto W = [&](const std::string& n) -> Q4KWeight {
         const TensorInfo* t = g.find(n);
@@ -106,7 +107,6 @@ void Engine::load(const std::string& path) {
     bact2d= arena_.alloc<float>(4ull * (Model::FFN / 32));
     basum2= arena_.alloc<int>(4ull * (Model::FFN / 16));
     bids  = arena_.alloc<int>(4);
-    bpos  = arena_.alloc<int>(4);
     battn_scratch = arena_.alloc<float>((size_t)Model::NH * 32 * (Model::HD + 2));
     rcs_ = arena_.alloc<float>((size_t)kCtx * Model::HD / 2);
     rsn_ = arena_.alloc<float>((size_t)kCtx * Model::HD / 2);
@@ -147,15 +147,15 @@ void Engine::make_workspace(Workspace* wp, int n_max, cudaStream_t s) {
 
 void Engine::prefill(Workspace& w, const int* ids, int n, float* kvk, float* kvv, int64_t pos0) {
     NOVA_REQUIRE(n <= w.n_max);
-    cudaMemcpyAsync(w.ids, ids, (size_t)n * sizeof(int), cudaMemcpyHostToDevice, w.s);
+    NOVA_CU(cudaMemcpyAsync(w.ids, ids, (size_t)n * sizeof(int), cudaMemcpyHostToDevice, w.s));
     Kernel::embed(w.x, tok_embd_, w.ids, n, w.s);
     for (int l = 0; l < Model::L; ++l) layer(w, l, n, pos0, kvk, kvv);
     head(w, n);
-    cudaStreamSynchronize(w.s);
+    NOVA_CU(cudaStreamSynchronize(w.s));
 }
 
 int Engine::decode(Workspace& w, int id, float* kvk, float* kvv, int64_t pos) {
-    cudaMemcpyAsync(w.ids, &id, sizeof(int), cudaMemcpyHostToDevice, w.s);
+    NOVA_CU(cudaMemcpyAsync(w.ids, &id, sizeof(int), cudaMemcpyHostToDevice, w.s));
     Kernel::embed(w.x, tok_embd_, w.ids, 1, w.s);
     for (int l = 0; l < Model::L; ++l) layer(w, l, 1, pos, kvk, kvv);
     head(w, 1);
@@ -164,9 +164,9 @@ int Engine::decode(Workspace& w, int id, float* kvk, float* kvv, int64_t pos) {
 
 int Engine::sample_last(Workspace& w) {
     if (h_logits_.empty()) h_logits_.resize((size_t)Model::V);
-    cudaMemcpyAsync(h_logits_.data(), w.logits, (size_t)Model::V * sizeof(float),
-                    cudaMemcpyDeviceToHost, w.s);
-    cudaStreamSynchronize(w.s);
+    NOVA_CU(cudaMemcpyAsync(h_logits_.data(), w.logits, (size_t)Model::V * sizeof(float),
+                            cudaMemcpyDeviceToHost, w.s));
+    NOVA_CU(cudaStreamSynchronize(w.s));
 
     const int V = (int)Model::V;
     const int K = kTopK < V ? kTopK : V;
@@ -279,7 +279,7 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
     constexpr int N = 4;
     int toks[N];
     for (int i = 0; i < N; ++i) toks[i] = it[i].tok_in;
-    cudaMemcpyAsync(bids, toks, sizeof(toks), cudaMemcpyHostToDevice, s);
+    NOVA_CU(cudaMemcpyAsync(bids, toks, sizeof(toks), cudaMemcpyHostToDevice, s));
     for (int i = 0; i < N; ++i) Kernel::embed(bx + i * Model::D, tok_embd_, bids + i, 1, s);
 
     auto A  = [&](int i) { return ActQ8{bact  + (size_t)i * Model::D,   bactd  + (size_t)i * (Model::D / 32),   basum  + (size_t)i * (Model::D / 16)}; };
@@ -297,7 +297,6 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
         launch_gemv4<Model::D, Model::NKV * Model::HD>(lw.k, bact, bactd, basum, bk, s);
         launch_gemv4<Model::D, Model::NKV * Model::HD>(lw.v, bact, bactd, basum, bv, s);
 
-        int pv[4] = {0, 0, 0, 0};
         for (int i = 0; i < N; ++i) {
             if (Model::qkv_bias) {
                 Kernel::bias(bq + i * Model::NH * Model::HD, lw.qb, Model::NH * Model::HD, Model::NH * Model::HD, s);
@@ -307,7 +306,6 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
             Kernel::rope_batch(bq + i * Model::NH * Model::HD, bk + i * Model::NKV * Model::HD, 1, it[i].pos, rcs_, rsn_, s);
             Kernel::kv_store(it[i].kvk + kvoff, it[i].kvv + kvoff,
                              bk + i * Model::NKV * Model::HD, bv + i * Model::NKV * Model::HD, 1, it[i].pos, s);
-            pv[i] = (int)it[i].pos;
         }
         for (int i = 0; i < N; ++i) {
             Kernel::attn_decode(bq + i * Model::NH * Model::HD, it[i].kvk + kvoff, it[i].kvv + kvoff,
@@ -335,8 +333,10 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
     }
     launch_gemv4<Model::D, Model::V>(out_w_, bact, bactd, basum, blogits, s);
     for (int i = 0; i < N; ++i) Kernel::sample(blogits + (size_t)i * Model::V, bids + i, s);
-    cudaMemcpyAsync(toks, bids, sizeof(toks), cudaMemcpyDeviceToHost, s);
-    cudaStreamSynchronize(s);
+    // 这里失败时 toks 仍等于本步的输入 token：不检查就会把 tok_in 当 tok_out 写回，
+    // 表现是每轮 32 个相同字符 + "1037 tok/s"（kernel 全部空转）。
+    NOVA_CU(cudaMemcpyAsync(toks, bids, sizeof(toks), cudaMemcpyDeviceToHost, s));
+    NOVA_CU(cudaStreamSynchronize(s));
     for (int i = 0; i < N; ++i) it[i].tok_out = toks[i];
 }
 

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0b0f14"/><stop offset="1" stop-color="#101a24"/></linearGradient></defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <text x="960" y="420" font-family="Consolas,monospace" font-size="120" fill="#e8f0f8" text-anchor="middle" letter-spacing="6">CONFLUX NOVA</text>
+  <text x="960" y="500" font-family="Consolas,monospace" font-size="44" fill="#5aa9e6" text-anchor="middle">FJEC_V2.1.0  ·  GTX 1080 Ti  ·  Qwen2.5-7B Q4_K</text>
+  <line x1="620" y1="560" x2="1300" y2="560" stroke="#2b3a48" stroke-width="2"/>
+  <text x="960" y="680" font-family="Consolas,monospace" font-size="64" fill="#e8f0f8" text-anchor="middle">104.5 tok/s  四路并发</text>
+  <text x="960" y="770" font-family="Consolas,monospace" font-size="40" fill="#8fa6b8" text-anchor="middle">单路 55.2 tok/s  ·  显存 7.1 GB  ·  MIT License</text>
+</svg>

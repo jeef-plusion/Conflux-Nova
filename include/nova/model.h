@@ -89,7 +89,7 @@ private:
     float *bg = nullptr, *bu = nullptr, *bd = nullptr, *blogits = nullptr;
     int8_t *bact = nullptr, *bact2 = nullptr;
     float *bactd = nullptr, *bact2d = nullptr;
-    int *basum = nullptr, *basum2 = nullptr, *bids = nullptr, *bpos = nullptr;
+    int *basum = nullptr, *basum2 = nullptr, *bids = nullptr;
     float* battn_scratch = nullptr;
     float*         kv_k_pool_ = nullptr;
     float*         kv_v_pool_ = nullptr;

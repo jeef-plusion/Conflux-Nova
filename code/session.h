@@ -81,11 +81,11 @@ public:
         s->kvk = engine_->kv_k_slot(slot);
         s->kvv = engine_->kv_v_slot(slot);
 
-        cudaStreamCreate(&s->ws.s);
+        NOVA_CU(cudaStreamCreate(&s->ws.s));
         engine_->make_workspace(&s->ws, kSessCtx, s->ws.s);
 
-        cudaMemset(s->kvk, 0, (size_t)Engine::kv_span() * sizeof(float));
-        cudaMemset(s->kvv, 0, (size_t)Engine::kv_span() * sizeof(float));
+        NOVA_CU(cudaMemset(s->kvk, 0, (size_t)Engine::kv_span() * sizeof(float)));
+        NOVA_CU(cudaMemset(s->kvv, 0, (size_t)Engine::kv_span() * sizeof(float)));
 
         Session* raw = s.get();
         live_.push_back(std::move(s));

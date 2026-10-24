@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="800" viewBox="0 0 1920 800">
+  <rect width="1920" height="800" fill="#0b0f14"/>
+  <text x="120" y="110" font-family="Consolas,monospace" font-size="46" fill="#e8f0f8">物理边界：不同 KV 长度下的聚合吞吐</text>
+  <text x="120" y="160" font-family="Consolas,monospace" font-size="26" fill="#5aa9e6">GTX 1080 Ti · Q4_K · gemv4 四路共享权重</text>
+  <text x="120" y="254" font-family="Consolas,monospace" font-size="30" fill="#c9d6e2">1.5B · 4 路 · KV≈290</text>
+  <rect x="620" y="220" width="1044" height="52" rx="6" fill="#3ddc84"/>
+  <text x="1684" y="256" font-family="Consolas,monospace" font-size="30" fill="#e8f0f8">303.8 tok/s</text>
+  <text x="120" y="384" font-family="Consolas,monospace" font-size="30" fill="#c9d6e2">7B · 4 路 · KV≈100</text>
+  <rect x="620" y="350" width="359" height="52" rx="6" fill="#5aa9e6"/>
+  <text x="999" y="386" font-family="Consolas,monospace" font-size="30" fill="#e8f0f8">104.5 tok/s</text>
+  <text x="120" y="514" font-family="Consolas,monospace" font-size="30" fill="#c9d6e2">7B · 3 路 · KV≈300</text>
+  <rect x="620" y="480" width="275" height="52" rx="6" fill="#f6c445"/>
+  <text x="915" y="516" font-family="Consolas,monospace" font-size="30" fill="#e8f0f8">80 tok/s</text>
+  <text x="120" y="644" font-family="Consolas,monospace" font-size="30" fill="#c9d6e2">7B · 4 路 · KV≈220</text>
+  <rect x="620" y="610" width="213" height="52" rx="6" fill="#e2635a"/>
+  <text x="853" y="646" font-family="Consolas,monospace" font-size="30" fill="#e8f0f8">62 tok/s</text>
+</svg>
