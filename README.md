@@ -141,7 +141,40 @@ Kv_block = { AFFAA1891C2A31DAC16958AC . 618649689ACDE6187F681AA2 }
 
 > 状态：架构层面已定稿，代码尚未实现（`Session` 中暂无块表）。
 
-## 1.4 目录结构
+## 1.4 文书层：硬件的三层划分
+
+我们把「硬件接入计算」的形态叫做**文书层**：它通过协议变成黑盒，外界只需要按协议与它协作完成推理。
+
+文书层内部划分为三层：
+
+```
+文书层
+├── 计算图（模型适配层）   层怎么连、模型长什么样
+├── kernel（内核工具层）    一个算子怎么算
+└── device（硬件底层库）    显存怎么开、数据怎么搬、命令怎么下
+```
+
+### 为什么这样拆
+
+**1. 一站式通用并不成立。** 很多模型并不适合在全部卡上用同一套推理方式，差异化是客观存在的。
+
+**2. 硬件只有在自己的能力范围内才是满血。** 为什么非要让它有加载「根本加载不了的模型」的可能？如果一张卡很强、能跑的模型更高，它自然会受欢迎，为它提供模型支持的人也会更多——适配成本对应的是它自己的能力，而不是大模型研发水平。
+
+**3. 内核需要真正懂硬件的人来优化。** 把它和模型适配层结合，就能实现**固定编译**，而不是推理过程中不断分支。这本身就是一种解耦：硬件厂商对应大模型就是工具，我们只是让工具的制造和调用更规范。
+
+**4. 边界收窄，但不绑定。** 我们的 kernel 与 device 现在用 CUDA，是因为 1080 Ti 本来就是 Nvidia 的；但我们不依赖它——理论上可以写出任何硬件的实现，不论形态，哪怕是多卡集群。
+
+### 三层与代码的对应
+
+| 层 | 负责 | 现状 | 2.2.0 目标 |
+|---|---|---|---|
+| 计算图 | 模具、层序列、会话记忆 | `include/nova/model/`、`src/model.cpp` 的 `layer()` | `code/graph/` |
+| kernel | 算子实现 | `src/kernel/`（已经是独立的） | `code/kernel/{cuda,vulkan}/` |
+| device | 显存/拷贝/流/同步 | 散落在 `model.cpp`、`session.h` | `code/device/hal.h` + 后端实现 |
+
+`hal.h` 是 2.2.0 的核心交付，只有六七个函数：`dev_alloc` / `dev_free` / `dev_upload` / `dev_download` / `dev_sync` / `dev_max_alloc`。
+
+## 1.5 目录结构
 
 ```
 code/
@@ -156,9 +189,18 @@ code/
 ├── map/qwen2.5/         model_map.h / tokenizer.h
 ├── main.h               初始化 + 主循环
 └── main.cpp
-src/kernel/              GEMV / MMQ / norm / rope / attn（数值单一真源）
+src/kernel/              GEMV / MMQ / norm / rope / attn（当前的内核层）
 src/loader/              GGUF 解析 + 特征签名校验
-src/model.cpp            权重上传 + 逐层 forward
+src/model.cpp            权重上传 + 逐层 forward（当前计算图与 device 混在这里）
+```
+
+2.2.0 会整理成三层：
+
+```
+code/
+├── graph/               计算图（模型适配层）：qwen2.h / deepseek.h / spec.h
+├── kernel/              内核工具层：cuda/ 与 vulkan/ 两套算子
+└── device/              硬件底层库：hal.h + cuda/ + vulkan/
 ```
 
 ---
@@ -189,6 +231,7 @@ src/model.cpp            权重上传 + 逐层 forward
 | 2 | `run_tests.bat` 的 `^` 续行在 cmd 下报语法错误 | 测试套件只跑第一组就中断，GPU 测试从未执行 | 改为单行命令 + `if errorlevel 1` |
 | 3 | `tests/gpu_gemv.cu` 调用已删除的 `q_proj<N>` API | 编译失败 | 改用 `q_proj_n`，补齐 16 元素激活和缓冲，`q_proj<4>` 走 MMQ 对拍 rel_l2 = 1.2e-06 |
 | 4 | `tests/gpu_misc.cu` 的 `attn_decode` 少一个 scratch 参数 | 编译失败 | 补上 split-K scratch 分配 |
+| 5 | 架构文档缺「文书层」三层划分 | 计算图 / kernel / device 的边界没有写清 | 新增 1.4 节，并给出 2.2.0 的目标目录 |
 
 > 现在 `run_tests.bat` 三组全部通过：`SELFTEST PASS` / `GPU SELFTEST PASS` / `MISC PASS`。
 
