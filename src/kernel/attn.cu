@@ -9,6 +9,9 @@ constexpr int NKV = Model::NKV;
 constexpr int HD  = Model::HD;
 constexpr int ND  = HD / 32;
 constexpr int MAXSPLIT = 32;
+// 1/sqrt(HD)：flash / fa_split / batch4 三条路径共用同一个常量，保证逐位可比
+template <int D> constexpr float attn_scale_of() { return (D == 64) ? 0.125f : 0.08838834764831845f; }
+constexpr float kScale = attn_scale_of<HD>();
 
 __device__ __forceinline__ float warp_max(float v) {
     #pragma unroll
@@ -179,7 +182,23 @@ __global__ void fa_combine_kernel(const float* __restrict__ part, float* __restr
     }
 }
 
-// ---- 四路批量 decode attention：一个 warp 一个 (session, head)，一次 launch 覆盖 4 路 ----
+// ---- 四路批量 decode attention：一个 block 管一个 (session, head)，block 内 BW 个 warp 切 KV ----
+// 上界语义以 launcher 的参考实现为准：launch_attn_decode 里 n_keys = n_past + 1，
+// fa_split_kernel 的 p 从 0 扫到 n_keys-1，即"解码第 pos 个位置时 KV 里已有 pos+1 个位置"
+// （第 pos 个位置的 K/V 由 kv_store(pos0=pos) 写入）。所以上界是 pos[s] + 1，含当前 token 自己。
+//
+// 一个 warp 独吞整段 KV 会把 250 个 key 串成一条长链（实测比逐路慢 2.2 倍：148us vs 67us/层），
+// 所以这里照 fa_split 的 block 内切分：BW 个 warp 各扫 1/BW 段，再在 smem 里做一次 online-softmax 合并，
+// 4 个 session 揉进同一次 launch（blockIdx 里编 s 和 h），省掉逐路实现 4×(split+combine) 的 7 次 launch。
+//
+// 状态：本版仍未接线（decode_batch 里还是逐路调用 attn_decode）。实测（1080Ti，n_past≈250）：
+//   attention 单层耗时  逐路 4×(split+combine) = 68us   vs   本 kernel = 36us（BW=4/8/16 -> 44/36/44us）
+//   端到端 aggregate    逐路 106.6 tok/s              vs   接线后 109.7 tok/s（6 次交替跑，+2.9%）
+// 正确性：8 token×4 路输出与逐路逐字节相同；单层输出 max_abs 差 2.4e-7（float 重排量级）。
+// 增益不到 5%（attention 只占单步 ~5%），按约定保持逐路实现；要启用就在 decode_batch 里换成
+// Kernel::attn_batch4(bq, k0..k3, v0..v3, bab, bpos, NH, NKV, HD, s)（bpos 需自己加回）。
+constexpr int BW = 8;    // 每个 (session, head) 用几个 warp 切 KV（实测 8 最快：36us/层）
+
 __global__ void attn_batch4_kernel(const float* __restrict__ q4,
                                    const float* __restrict__ k0, const float* __restrict__ k1,
                                    const float* __restrict__ k2, const float* __restrict__ k3,
@@ -187,37 +206,75 @@ __global__ void attn_batch4_kernel(const float* __restrict__ q4,
                                    const float* __restrict__ v2, const float* __restrict__ v3,
                                    float* __restrict__ o4, const int* __restrict__ pos,
                                    int nh, int nkv, int hd) {
-    const int warp = (int)((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
-    const int lane = threadIdx.x & 31;
-    const int s = warp / nh;
-    if (s >= 4) return;
-    const int h = warp - s * nh;
+    __shared__ float spart[BW][HD + 2];
+
+    const int tid  = (int)threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int bid  = (int)blockIdx.x;
+    const int s    = bid / nh;                          // 0..3
+    const int h    = bid - s * nh;                      // 0..nh-1
     const float* K = (s == 0) ? k0 : (s == 1) ? k1 : (s == 2) ? k2 : k3;
     const float* V = (s == 0) ? v0 : (s == 1) ? v1 : (s == 2) ? v2 : v3;
-    const int kvh = h / (nh / nkv);
-    const int p_end = pos[s];
+    const int kvh = h / (nh / nkv);                     // GQA：连续 nh/nkv 个 q head 共用一份 kv head
+    const int p_end = pos[s] + 1;                       // 含当前 token（见上面的注释）
+    const int q4n = (p_end + BW - 1) / BW;              // 本 warp 负责的 key 数
+    const int kv0 = warp * q4n;
+    int kv1 = kv0 + q4n;
+    if (kv1 > p_end) kv1 = p_end;
+
     const float* q  = q4 + (size_t)s * nh * hd + (size_t)h * hd;
     const float* kb = K + (size_t)kvh * hd;
     const float* vb = V + (size_t)kvh * hd;
-    float*       ob = o4 + (size_t)s * nh * hd + (size_t)h * hd;
-    const int nper = hd / 32;
-    float m = -1e30f, l = 0.f, acc[4] = {0.f, 0.f, 0.f, 0.f};
-    for (int p = 0; p < p_end; ++p) {
-        const float* kk = kb + (size_t)p * nkv * hd;
-        const float* vv = vb + (size_t)p * nkv * hd;
+    const size_t kstep = (size_t)nkv * hd;              // 布局 [pos][nkv][hd]
+
+    float m = -INFINITY, l = 0.f;
+    float acc[ND] = {};                                 // ND = hd/32，编译期定长 → 留在寄存器里
+    for (int p = kv0; p < kv1; ++p) {
+        const float* kk = kb + (size_t)p * kstep;
+        const float* vv = vb + (size_t)p * kstep;
         float sc = 0.f;
-        for (int j = 0; j < nper; ++j) sc += q[lane + j * 32] * kk[lane + j * 32];
+        #pragma unroll
+        for (int j = 0; j < ND; ++j) sc = fmaf(q[lane + j * 32], kk[lane + j * 32], sc);
         #pragma unroll
         for (int o2 = 16; o2 > 0; o2 >>= 1) sc += __shfl_xor_sync(0xffffffffu, sc, o2);
-        const float m2 = fmaxf(m, sc);
-        const float e  = __expf(sc - m2);
-        const float corr = (p == 0) ? 0.f : __expf(m - m2);
-        l = l * corr + e;
-        for (int j = 0; j < nper; ++j) acc[j] = acc[j] * corr + e * vv[lane + j * 32];
+        const float qk   = sc * kScale;                 // 与 fa_split 的 warp_sum(part)*scale 同序
+        const float m2   = fmaxf(m, qk);
+        const float corr = __expf(m - m2);              // 首轮 m = -inf → corr = 0，无需特判
+        const float e    = __expf(qk - m2);
+        l = fmaf(l, corr, e);
+        #pragma unroll
+        for (int j = 0; j < ND; ++j) acc[j] = fmaf(acc[j], corr, e * vv[lane + j * 32]);
         m = m2;
     }
-    const float inv = l > 0.f ? 1.f / l : 0.f;
-    for (int j = 0; j < nper; ++j) ob[lane + j * 32] = acc[j] * inv;
+
+    // block 内合并（与 fa_split 的 4 warp 合并同式），然后直接归一化写出，不再需要 combine kernel
+    if (lane == 0) { spart[warp][0] = m; spart[warp][1] = l; }
+    #pragma unroll
+    for (int j = 0; j < ND; ++j) spart[warp][2 + lane + j * 32] = acc[j];
+    __syncthreads();
+
+    if (warp == 0) {
+        float mm = -INFINITY;
+        #pragma unroll
+        for (int w = 0; w < BW; ++w) mm = fmaxf(mm, spart[w][0]);
+        float ll = 0.f;
+        #pragma unroll
+        for (int w = 0; w < BW; ++w) {
+            const float ls = spart[w][1];
+            if (ls > 0.f) ll = fmaf(ls, __expf(spart[w][0] - mm), ll);
+        }
+        const float inv = ll > 0.f ? 1.f / ll : 0.f;
+        float* ob = o4 + (size_t)s * nh * hd + (size_t)h * hd;
+        #pragma unroll
+        for (int j = 0; j < ND; ++j) {
+            const int dc = 2 + lane + j * 32;
+            float a = 0.f;
+            #pragma unroll
+            for (int w = 0; w < BW; ++w) a = fmaf(spart[w][dc], __expf(spart[w][0] - mm), a);
+            ob[lane + j * 32] = a * inv;
+        }
+    }
 }
 // ---- 防掉频：一个 block 空转，给 WDDM 持续负载 ----
 __global__ void keepalive_kernel(unsigned long long cycles) {
@@ -234,15 +291,13 @@ void launch_attn_batch4(const float* q4,
                         const float* k0, const float* k1, const float* k2, const float* k3,
                         const float* v0, const float* v1, const float* v2, const float* v3,
                         float* o4, const int* pos, int nh, int nkv, int hd, cudaStream_t st) {
-    const int warps  = nh * 4;
-    const int blocks = (warps + 3) / 4;
-    attn_batch4_kernel<<<blocks, 128, 0, st>>>(q4, k0, k1, k2, k3, v0, v1, v2, v3, o4, pos, nh, nkv, hd);
+    attn_batch4_kernel<<<nh * 4, BW * 32, 0, st>>>(q4, k0, k1, k2, k3, v0, v1, v2, v3, o4, pos, nh, nkv, hd);
 }
 
 
 void launch_attn_prefill(const float* q, const float* kc, const float* vc, float* o,
                          int n_q, int n_past, cudaStream_t s) {
-    constexpr float scale = (HD == 64) ? 0.125f : 0.08838834764831845f;
+    constexpr float scale = kScale;
     const int warps = NH * n_q;
     if constexpr (ArchTraits<typename Model::arch>::kMask == MaskKind::Causal)
         flash_kernel<false><<<(warps + 3) / 4, 128, 0, s>>>(q, kc, vc, o, n_q, n_past, scale);
@@ -252,7 +307,7 @@ void launch_attn_prefill(const float* q, const float* kc, const float* vc, float
 
 void launch_attn_decode(const float* q, const float* kc, const float* vc, float* o,
                         int n_past, float* scratch, cudaStream_t s) {
-    constexpr float scale = (HD == 64) ? 0.125f : 0.08838834764831845f;
+    constexpr float scale = kScale;
     const int n_keys = n_past + 1;
 
     int nsplit = (n_keys + 31) / 32;
