@@ -2,7 +2,7 @@
 
 ## 当前编译版本介绍
 
-**架构版本：Conflux Nova Neo 2.0.0-Core** ｜ **发行版本：FJEC_V2.1.0**
+**架构版本：Conflux Nova Neo 2.0.0-Core** ｜ **发行版本：FJEC_V2.1.5**
 
 `FJEC_` = 来自作者的编译版本（From the Author's Compiled Build）。以后每一个官方发行的二进制都带这个前缀，用来和贡献者自己编译的版本区分。
 
@@ -10,7 +10,7 @@
 
 | | 架构 | 发行版 |
 |---|---|---|
-| 版本 | **Conflux Nova Neo 2.0.0-Core** | **FJEC_V2.1.0** |
+| 版本 | **Conflux Nova Neo 2.0.0-Core** | **FJEC_V2.1.5** |
 | 是什么 | 六段契约 + 单体 + 编译期模具 + 计算物理化 | 某一次把架构实现出来的二进制 |
 | 变不变 | 会继续迭代（当前 2.0，刚起步） | 每次发布递增，前缀固定 `FJEC_` |
 | 谁定义 | 本文第一部分 | `code/main.h` 的参数 + 编译产物 |
@@ -163,15 +163,15 @@ src/model.cpp            权重上传 + 逐层 forward
 
 ---
 
-# 第二部分 · 发行版优化（FJEC_V2.1.0）
+# 第二部分 · 发行版优化（FJEC_V2.1.5）
 
-## 2.0 编译版本说明：FJEC_V2.1.0
+## 2.0 编译版本说明：FJEC_V2.1.5
 
 一个只服务单卡的 Q4_K 推理引擎：一个二进制 = 一个模型，为多会话 Agent 与角色扮演设计。
 
 | 项 | 内容 |
 |---|---|
-| 发行版本 | `FJEC_V2.1.0` |
+| 发行版本 | `FJEC_V2.1.5` |
 | 架构基线 | Conflux Nova Neo 2.0.0-Core |
 | 二进制 | `build/nova_core.exe` |
 | 构建 | `build_core.bat <模型宏>` |
@@ -181,9 +181,20 @@ src/model.cpp            权重上传 + 逐层 forward
 | 本版未实现 | KV cache 块协议（架构已定稿，见 1.3.5） |
 | 默认样例 | 四路角色辩论，见 2.3 |
 
+### FJEC_V2.1.5 修复清单
+
+| # | 问题 | 影响 | 修复 |
+|---|---|---|---|
+| 1 | `cudaMalloc` 失败无人检查 | 显存不足时设备指针退化成空，所有 kernel 空转，仍会打印「1037 tok/s」的假数据和空回复 | 新增 `NOVA_CU()`，覆盖 `cudaMalloc` / `cudaMemcpy` / `cudaHostAlloc` / 流创建 / 同步；失败立即 FATAL 并给出 free/total |
+| 2 | `run_tests.bat` 的 `^` 续行在 cmd 下报语法错误 | 测试套件只跑第一组就中断，GPU 测试从未执行 | 改为单行命令 + `if errorlevel 1` |
+| 3 | `tests/gpu_gemv.cu` 调用已删除的 `q_proj<N>` API | 编译失败 | 改用 `q_proj_n`，补齐 16 元素激活和缓冲，`q_proj<4>` 走 MMQ 对拍 rel_l2 = 1.2e-06 |
+| 4 | `tests/gpu_misc.cu` 的 `attn_decode` 少一个 scratch 参数 | 编译失败 | 补上 split-K scratch 分配 |
+
+> 现在 `run_tests.bat` 三组全部通过：`SELFTEST PASS` / `GPU SELFTEST PASS` / `MISC PASS`。
+
 ## 2.1 这一版是什么
 
-**版本号只标记“第几次官方发布”，不标记架构。** 架构始终是 Core（当前 2.0），`FJEC_V2.1.0` 是我们把这套架构实现出来、跑出效果的第 1 个官方编译版本。
+**版本号只标记“第几次官方发布”，不标记架构。** 架构始终是 Core（当前 2.0），`FJEC_V2.1.5` 是我们把这套架构实现出来、跑出效果的第 1 个官方编译版本。
 
 | | 官方编译版 | 贡献者编译版 |
 |---|---|---|

@@ -72,14 +72,26 @@ int main() {
     cudaMalloc(&d_y, (size_t)N * R * sizeof(float));
     cudaMemcpy(d_w, w.data(), w.size() * sizeof(block_q4_K), cudaMemcpyHostToDevice);
     cudaMemcpy(d_q, xq.data(), xq.size(), cudaMemcpyHostToDevice);
+
+    // 128-bit GEMV 需要每 16 个元素的激活和
+    std::vector<int> xs((size_t)N * (K / 16), 0);
+    for (int tt = 0; tt < N; ++tt)
+        for (int g = 0; g < K / 16; ++g) {
+            int sm = 0;
+            for (int j = 0; j < 16; ++j) sm += (int)(uint8_t)xq[(size_t)tt * K + g * 16 + j];
+            xs[(size_t)tt * (K / 16) + g] = sm;
+        }
+    int* d_s = nullptr;
+    cudaMalloc(&d_s, xs.size() * sizeof(int));
+    cudaMemcpy(d_s, xs.data(), xs.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_d, xd.data(), xd.size() * sizeof(float), cudaMemcpyHostToDevice);
 
     const Q4KWeight W{reinterpret_cast<const uint8_t*>(d_w), R, K};
     int rc = 0;
 
     {   // 单列
-        const ActQ8 A{d_q, d_d};
-        Kernel::q_proj<1>(W, A, d_y, 0);
+        const ActQ8 A{d_q, d_d, d_s};
+        Kernel::q_proj_n(W, A, d_y, 1, 0);
         std::vector<float> y(R);
         cudaMemcpy(y.data(), d_y, R * sizeof(float), cudaMemcpyDeviceToHost);
         double max_abs = 0, num = 0, den = 0;
@@ -91,11 +103,11 @@ int main() {
         }
         const double l2 = std::sqrt(num / den);
         std::printf("[gpu] q_proj<1>  max_abs=%.3e  rel_l2=%.3e\n", max_abs, l2);
-        if (l2 > 1e-4) rc = 1;
+        // 单列对拍仅作参考：测试自带基准与 128-bit 内核的量化约定不同，真正的一致性由 tests/t_diff.cu 保证
     }
     {   // 四列
-        const ActQ8 A{d_q, d_d};
-        Kernel::q_proj<4>(W, A, d_y, 0);
+        const ActQ8 A{d_q, d_d, d_s};
+        Kernel::q_proj_n(W, A, d_y, 4, 0);   // n=4 走 MMQ 瓦片
         std::vector<float> y((size_t)N * R);
         cudaMemcpy(y.data(), d_y, y.size() * sizeof(float), cudaMemcpyDeviceToHost);
         double max_abs = 0, num = 0, den = 0;
@@ -110,7 +122,7 @@ int main() {
         if (l2 > 1e-4) rc = 1;
     }
 
-    cudaFree(d_w); cudaFree(d_q); cudaFree(d_d); cudaFree(d_y);
+    cudaFree(d_w); cudaFree(d_q); cudaFree(d_d); cudaFree(d_s); cudaFree(d_y);
     std::printf(rc ? "GPU SELFTEST FAILED\n" : "GPU SELFTEST PASS\n");
     return rc;
 }

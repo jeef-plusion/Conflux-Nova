@@ -50,7 +50,9 @@ int main() {
     std::vector<float> hqq((size_t)NH * HD, 0.5f);
     cudaMemcpy(q, hqq.data(), hqq.size() * 4, cudaMemcpyHostToDevice);
 
-    Kernel::attn_decode(q, kc, vc, o, 0, 0);
+    static float* scr = nullptr;
+        if (!scr) cudaMalloc(&scr, (size_t)Model::NH * 32 * (Model::HD + 2) * sizeof(float));
+        Kernel::attn_decode(q, kc, vc, o, 0, scr, 0);
     std::vector<float> ho((size_t)NH * HD);
     cudaMemcpy(ho.data(), o, ho.size() * 4, cudaMemcpyDeviceToHost);
     float amax = 0;
