@@ -1,6 +1,7 @@
 // nova_v2/src/model.cpp — 权重上传 + 逐层 forward（工作区/流按会话传入）
 #include "nova/model.h"
 #include "nova/loader/validate.h"
+#include "graph/graph.h"    // 计算图层：一层由哪些算子按什么顺序组成（编译期）
 #include <cstdio>
 #include <numeric>
 #include <algorithm>
@@ -200,70 +201,14 @@ int Engine::sample_last(Workspace& w) {
 }
 
 void Engine::layer(Workspace& w, int l, int n, int64_t pos0, float* kvk, float* kvv) {
-    const LayerW& lw = layers_[l];
-    const ActQ8 A{w.act, w.actd, w.asum};
-    const ActQ8 A2{w.act2, w.act2d, w.asum2};
-    const int64_t kvoff = (int64_t)l * kMaxCtx * Model::NKV * Model::HD;
-
-    prof.begin(PH_NORM);
-    Kernel::rms_norm(w.h, w.x, lw.attn_norm, n, w.s);
-    Kernel::quant(A, w.h, n, w.s);
-    prof.end();
-
-    prof.begin(PH_MM);
-    Kernel::q_proj_n(lw.q, A, w.qb, n, w.s);
-    Kernel::k_proj_n(lw.k, A, w.kb, n, w.s);
-    Kernel::v_proj_n(lw.v, A, w.vb, n, w.s);
-    prof.end();
-
-    prof.begin(PH_ELEM);
-    if (Model::qkv_bias) {
-        Kernel::bias(w.qb, lw.qb, n * Model::NH * Model::HD, Model::NH * Model::HD, w.s);
-        Kernel::bias(w.kb, lw.kb, n * Model::NKV * Model::HD, Model::NKV * Model::HD, w.s);
-        Kernel::bias(w.vb, lw.vb, n * Model::NKV * Model::HD, Model::NKV * Model::HD, w.s);
-    }
-    prof.end();
-
-    prof.begin(PH_ROPE);
-    Kernel::rope_batch(w.qb, w.kb, n, pos0, rcs_, rsn_, w.s);
-    Kernel::kv_store(kvk + kvoff, kvv + kvoff, w.kb, w.vb, n, pos0, w.s);
-    prof.end();
-
-    prof.begin(PH_ATTN);
-    if (n == 1) Kernel::attn_decode(w.qb, kvk + kvoff, kvv + kvoff, w.ab, (int)pos0, w.attn_scratch, w.s);
-    else        Kernel::attn_prefill(w.qb, kvk + kvoff, kvv + kvoff, w.ab, n, (int)pos0, w.s);
-    prof.end();
-
-    prof.begin(PH_MM);
-    Kernel::quant(A, w.ab, n, w.s);
-    Kernel::o_proj_n(lw.o, A, w.db, n, w.s);
-    prof.end();
-
-    prof.begin(PH_ELEM);
-    Kernel::residual(w.x, w.db, n * Model::D, w.s);
-    prof.end();
-
-    prof.begin(PH_NORM);
-    Kernel::rms_norm(w.h, w.x, lw.ffn_norm, n, w.s);
-    Kernel::quant(A, w.h, n, w.s);
-    prof.end();
-
-    prof.begin(PH_MM);
-    Kernel::gate_n(lw.gate, A, w.gb, n, w.s);
-    Kernel::up_n(lw.up, A, w.ub, n, w.s);
-    prof.end();
-
-    prof.begin(PH_ELEM);
-    Kernel::swiglu_ffn(A2, w.gb, w.gb, w.ub, n, w.s);
-    prof.end();
-
-    prof.begin(PH_MM);
-    Kernel::down_n(lw.down, A2, w.db, n, w.s);
-    prof.end();
-
-    prof.begin(PH_ELEM);
-    Kernel::residual(w.x, w.db, n * Model::D, w.s);
-    prof.end();
+    // 一层的算子顺序由计算图层在编译期给出（code/graph/），这里只负责摆好上下文。
+    // 具体序列：graph::ActiveGraph::ops（qwen2.h / llama.h），执行：dense.h 的 DenseLayer。
+    graph::LayerCtx c{w, layers_[l], prof, n, pos0, kvk, kvv,
+                      (int64_t)l * kMaxCtx * Model::NKV * Model::HD,
+                      rcs_, rsn_,
+                      ActQ8{w.act, w.actd, w.asum},
+                      ActQ8{w.act2, w.act2d, w.asum2}};
+    graph::ActiveGraph::run(c);
 }
 
 void Engine::head(Workspace& w, int n) {
