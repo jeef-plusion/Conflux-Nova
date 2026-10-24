@@ -165,6 +165,22 @@ src/model.cpp            权重上传 + 逐层 forward
 
 # 第二部分 · 发行版优化（FJEC_V2.1.0）
 
+## 2.0 编译版本说明：FJEC_V2.1.0
+
+一个只服务单卡的 Q4_K 推理引擎：一个二进制 = 一个模型，为多会话 Agent 与角色扮演设计。
+
+| 项 | 内容 |
+|---|---|
+| 发行版本 | `FJEC_V2.1.0` |
+| 架构基线 | Conflux Nova Neo 2.0.0-Core |
+| 二进制 | `build/nova_core.exe` |
+| 构建 | `build_core.bat <模型宏>` |
+| 已验证模型 | Qwen2.5-7B / 1.5B、R1-Distill-Qwen-7B / 1.5B、R1-Distill-Qwen-1.5B-Abliterated |
+| 本版能力 | 多会话隔离、KV 复用、`gemv4` 批量 decode、ChatML/DeepSeek 双模板、可控采样、流式输出 |
+| 本版未启用 | `attn_batch4`（代码保留在 `attn.cu`，未调用） |
+| 本版未实现 | KV cache 块协议（架构已定稿，见 1.3.5） |
+| 默认样例 | 四路角色辩论，见 2.3 |
+
 ## 2.1 这一版是什么
 
 **版本号只标记“第几次官方发布”，不标记架构。** 架构始终是 Core（当前 2.0），`FJEC_V2.1.0` 是我们把这套架构实现出来、跑出效果的第 1 个官方编译版本。
