@@ -1,38 +1,35 @@
-// code/main.h — 总装：参数配置 + 控制台入口
+// code/main.h — 四路并发多智能体辩论（婚姻主题）
 #pragma once
 #include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <string>
 #include <vector>
-
-#include "kernel/1080ti/kernel_api.h"
-#include "map/qwen2.5/model_map.h"
-#include "map/qwen2.5/tokenizer.h"
-#include "USER_INPUT_TXT.h"
-#include "INPUT_INPUT.h"
-#include "OUT_TKZ.h"
-#include "OUT_chat.h"
-#include "OUT_OUT.h"
+#include "session.h"
+#include "INPUT_CHAT.h"
 
 namespace cfg {
-// ---- 全部可调参数都在这里，内核不感知 ----
 inline constexpr const char* kModelPath = "build/q4k.gguf";
 inline constexpr const char* kCardName  = "Qwen2.5-7B-Instruct";
-inline constexpr int  kCtx     = 2048;
-inline constexpr int  kMaxNew  = 96;
-inline constexpr const char* kQuestion = "请推导 f(x)=x^3-3x 的极值点";
+inline constexpr int kCtx     = 2048;
+inline constexpr int kTurn    = 24;
+inline constexpr int kRounds  = 3;
+inline constexpr const char* kTopic = "人类到底要不要结婚？请亮明立场。";
+inline constexpr const char* kSys[4] = {
+    "你是一个传统的中国长辈。你认为结婚生子是天经地义的，是人生的必经之路。你语气焦急，喜欢用'不孝有三，无后为大'、'老了谁照顾你'来反驳别人。输出限制50字以内。",
+    "你是一个极致的自由主义者。你认为婚姻是反人性的制度，是资本的陷阱。你强调个人自由、搞钱和不被打扰的生活，语气冰冷且犀利。输出限制50字以内。",
+    "你是个看透一切的乐子人。你觉得结不结婚都行，反正最后都会后悔。你疯狂拱火，引用离谱的社会新闻或哲学梗来嘲笑另外两方。输出限制50字以内。",
+    "你只认钱。你认为结不结婚根本无所谓，关键看彩礼多少、房子写谁名字、离婚怎么分财产。没有物质的婚姻就是一盘散沙，语气极其世俗和精算。输出限制50字以内。",
+};
+inline constexpr const char* kLabel[4] = {"A 催婚长辈", "B 不婚主义", "C 乐子人", "D 现实主义者"};
 }
 
 namespace nova {
-
 inline const ModelCard* pick_card(const char* name) {
     for (int i = 0; i < kCardCount; ++i)
         if (std::strcmp(kCards[i].name, name) == 0) return &kCards[i];
-    std::fprintf(stderr, "[ERROR] 不支持的模型: %s\n", name);
-    std::exit(2);
+    std::fprintf(stderr, "[ERROR] unsupported model: %s\n", name); std::exit(2);
 }
-
 inline void banner() {
     std::printf("\n");
     std::printf("   ______                 ____  _   __                 \n");
@@ -40,79 +37,105 @@ inline void banner() {
     std::printf(" / /   / __ \\/ __ \\/ ___/ / /  |/ / __ \\ | / / _ \\    \n");
     std::printf("/ /___/ /_/ / / / / /__/ / / /|  / /_/ / |/ /  __/    \n");
     std::printf("\\____/\\____/_/ /_/\\___/_/_/ /_|_/\\____/|___/\\___/     \n");
-    std::printf("                                                     \n");
     std::printf("   >> V 2 . 0 . 0 - Core  |  Powered by 1080Ti <<\n\n");
 }
-
-inline void print_models() {
-    std::printf("[INFO] 支持的模型清单:\n");
-    for (int i = 0; i < kCardCount; ++i)
-        std::printf("       %-32s %-5s  ChatML\n", kCards[i].name, kCards[i].size);
-}
-
-inline int run(const char* path, const char* card_name, const char* question,
-               int n_ctx, int max_new) {
-    const ModelCard* card = pick_card(card_name);
-
-    GgufFile meta(path);
-    Tokenizer tk;
-    tk.load(meta);
-
-    Engine engine;
-    engine.load(path, n_ctx);
-
-    // 1) 文本 → 模板串
-    const std::string prompt = build_prompt(*card, question);
-    // 2) 模板串 → Token
-    const std::vector<int> ids = encode_chat(tk, prompt);
-    const int im_end = tk.id(card->im_end, 151645);
-
-    std::printf("\n[USER] %s\n", question);
-    std::printf("[TOKENS] prompt=%zu  first: ", ids.size());
-    for (size_t i = 0; i < ids.size() && i < 12; ++i) std::printf("%d ", ids[i]);
-    std::printf("...\n");
-    std::fflush(stdout);
-
-    using clk = std::chrono::steady_clock;
-    const auto t0 = clk::now();
-    engine.prefill(ids.data(), (int)ids.size());
-    const auto t1 = clk::now();
-
-    std::vector<int> out;
-    out.reserve(max_new);
-    int next = ids.empty() ? im_end : ids.back();
-    (void)next;
-    // 首 token 由 prefill 后的 head 给出，直接从 decode 循环里取
-    int tok = 0;
-    {
-        const std::vector<int> seed{ids.back()};
-        (void)seed;
-    }
-    // 用最后一个 prompt token 走一次 decode，得到第一个回答 token
-    // （prefill 已经把 KV 填好，这里相当于第 n 步）
-    tok = engine.decode(ids.back());
-    const auto t2 = clk::now();
-    while ((int)out.size() < max_new) {
-        if (tok == im_end) break;
-        out.push_back(tok);
-        tok = engine.decode(tok);
-    }
-    const auto t3 = clk::now();
-
-    const double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    const double decode_ms  = std::chrono::duration<double, std::milli>(t3 - t2).count();
-    const std::string text  = clean_reply(tokens_to_text(tk, out));
-    emit(text, prefill_ms, decode_ms, (int)out.size());
-    return 0;
-}
-
 } // namespace nova
 
 int main(int argc, char** argv) {
     nova::banner();
-    std::printf("[INFO] Conflux Nova V2.0.0\n");
-    nova::print_models();
+    std::printf("[INFO] Conflux Nova V2.0.0  |  4-way debate\n");
     const char* path = argc > 1 ? argv[1] : cfg::kModelPath;
-    const char* q    = argc > 2 ? argv[2] : cfg::kQuestion;
-    return nova::run(path, cfg::kCardName, q, cfg::kCtx, cfg::kMaxNew);
+
+    nova::GgufFile meta(path);
+    nova::Tokenizer tk; tk.load(meta);
+    nova::Engine engine; engine.load(path);
+    const nova::ModelCard* card = nova::pick_card(cfg::kCardName);
+    nova::sessions().init(&engine);
+
+    constexpr int N = 4;
+    nova::Session* s[N];
+    for (int i = 0; i < N; ++i) {
+        s[i] = nova::sessions().create(card, &tk, cfg::kTurn);
+        s[i]->sys = cfg::kSys[i];
+    }
+    std::printf("[SESSION] %d live, kv/session %.0f MB\n", nova::sessions().live_count(),
+                (double)nova::Engine::kv_span() * 4 / 1048576.0);
+
+    using clk = std::chrono::steady_clock;
+    std::string prev[N];
+    double total_ms = 0; int total_tok = 0;
+
+    for (int round = 0; round < cfg::kRounds; ++round) {
+        std::printf("\n########## ROUND %d ##########\n", round + 1);
+
+        for (int i = 0; i < N; ++i) {
+            std::string user;
+            if (round == 0) user = (card->asst ? std::string(cfg::kSys[i]) + "\n\n" : std::string()) + cfg::kTopic;
+            else {
+                user = "刚才有人说：";
+                int quoted = 0;
+                for (int j = 0; j < N && quoted < 2; ++j) {
+                    if (j == i) continue;
+                    std::string q = prev[j];
+                    if (q.size() > 36) q = q.substr(0, 36);   // 截断，别把上下文撑爆
+                    user += "\"" + q + "\" ";
+                    ++quoted;
+                }
+                user += "你怎么回？";
+            }
+            s[i]->history.push_back({"user", user});
+
+            std::string delta; int64_t pos0 = 0;
+            if (!s[i]->kv_valid) delta = nova::render_full(*card, s[i]->history, s[i]->sys);
+            else {
+                if (card->asst) delta = std::string(card->im_end) + card->im_start + user + card->asst;
+                else delta = std::string(card->im_end) + "\n" + card->im_start + "user\n" + user + card->im_end + "\n" + card->im_start + "assistant\n";
+                pos0 = s[i]->n_past;
+            }
+            auto ids = nova::encode_chat(tk, delta);
+            engine.prefill(s[i]->ws, ids.data(), (int)ids.size(), s[i]->kvk, s[i]->kvv, pos0);
+            s[i]->n_past = pos0 + (int64_t)ids.size();
+            s[i]->kv_valid = true;
+            s[i]->out_ids.clear();
+            s[i]->out_ids.push_back(engine.sample_last(s[i]->ws));
+        }
+
+        const auto t0 = clk::now();
+        const int im_end = tk.id(card->im_end, 128247);
+        int last[N]; bool done[N];
+        for (int i = 0; i < N; ++i) { last[i] = s[i]->out_ids[0]; done[i] = (last[i] == im_end); }
+        nova::Engine::BatchItem bi[N];
+        for (int t = 1; t < cfg::kTurn; ++t) {
+            for (int i = 0; i < N; ++i) bi[i] = nova::Engine::BatchItem{last[i], s[i]->kvk, s[i]->kvv, s[i]->n_past, 0};
+            engine.decode_batch(bi, N, s[0]->ws.s);
+            for (int i = 0; i < N; ++i) {
+                last[i] = bi[i].tok_out; ++s[i]->n_past;
+                if (done[i]) continue;
+                if (last[i] == im_end) { done[i] = true; continue; }
+                s[i]->out_ids.push_back(last[i]);
+            }
+        }
+        const double ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+        total_ms += ms; total_tok += N * cfg::kTurn;
+
+        for (int i = 0; i < N; ++i) {
+            std::string txt = nova::clean_reply(tk.decode(s[i]->out_ids));
+            prev[i] = txt;
+            std::printf("[%s] %s\n", cfg::kLabel[i], txt.c_str());
+            s[i]->history.push_back({"assistant", txt});
+        }
+        std::printf("[PERF] round %d: %d tok x%d in %.0f ms | %.1f tok/s per session | %.1f tok/s total\n",
+                    round + 1, cfg::kTurn, N, ms, cfg::kTurn * 1000.0 / ms, cfg::kTurn * N * 1000.0 / ms);
+        std::fflush(stdout);
+    }
+
+    std::printf("\n================ SUMMARY ================\n");
+    std::printf("batch decode : %.0f ms total\n", total_ms);
+    std::printf("aggregate    : %.2f tok/s\n", total_tok * 1000.0 / total_ms);
+    std::printf("per session  : %.2f tok/s\n", cfg::kTurn * 1000.0 / (total_ms / cfg::kRounds));
+    std::printf("kv lengths   : %lld / %lld / %lld / %lld\n", (long long)s[0]->n_past,
+                (long long)s[1]->n_past, (long long)s[2]->n_past, (long long)s[3]->n_past);
+    std::printf("live sessions: %d\n", nova::sessions().live_count());
+    std::fflush(stdout);
+    return 0;
 }

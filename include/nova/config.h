@@ -20,7 +20,14 @@ inline constexpr int kBlockBytes   = 144;
 inline constexpr int kGroupsPerBlk = 8;    // 8 个 32-元素子块
 
 // 编译期定死的运行参数（原 CN_* 环境变量）
-inline constexpr int kCtx             = 4096;   // 上下文上限
+inline constexpr int kCtx             = 4096;   // RoPE 表长度
+inline constexpr int kMaxCtx          = 2048;   // 单会话上下文上限
+inline constexpr int kMaxSessions     = 4;      // 并发会话数（KV 预先切好）
+inline constexpr int kSessCtx         = 512;
+// 采样参数（greedy 会复读，必须带温度）
+inline constexpr int   kTopK = 40;
+inline constexpr float kTopP = 0.95f;
+inline constexpr float kTemp = 0.8f;   // 单会话工作区 token 上限（激活缓冲）
 inline constexpr int kSmemPerBlock    = 48 * 1024;
 inline constexpr int kWarpsPerBlock   = 8;
 inline constexpr int kThreadsPerBlock = kWarpsPerBlock * 32;

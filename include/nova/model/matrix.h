@@ -48,6 +48,8 @@ using R1_Qwen7B   = ModelSpec<Qwen2, 28, 3584, 28, 4, 128, 18944, 152064, false,
 // 1.5B：张量表里没有 output.weight（tie），但 GGUF 的 tie_word_embeddings 写成 0，以张量表为准
 using Qwen25_1p5B = ModelSpec<Qwen2, 28, 1536, 12, 2, 128,  8960, 151936, true,  1000000>;
 using R1_Qwen1p5B = ModelSpec<Qwen2, 28, 1536, 12, 2, 128,  8960, 151936, true,  1000000>;
+// 变种：abliterated 微调把 theta 改回 1e4、output 解绑
+using Abl1p5B     = ModelSpec<Qwen2, 28, 1536, 12, 2, 128,  8960, 151936, false, 10000>;
 using R1_Llama8B  = ModelSpec<Llama, 32, 4096, 32, 8, 128, 14336, 128256, false,  500000>;
 
 } // namespace nova

@@ -19,6 +19,10 @@ using ActiveModel = nova::Qwen25_1p5B;
 inline constexpr const char* kModelName = "DeepSeek-R1-Distill-Qwen-1.5B";
 inline constexpr const char* kModelAliases[] = {"DeepSeek-R1-Distill-Qwen-1.5B", "R1-Distill-Qwen-1.5B"};
 using ActiveModel = nova::R1_Qwen1p5B;
+#elif defined(NOVA_MODEL_R1_QWEN1P5B_ABL)
+inline constexpr const char* kModelName = "DeepSeek-R1-Distill-Qwen-1.5B-Abliterated";
+inline constexpr const char* kModelAliases[] = {"DeepSeek-R1-Distill-Qwen-1.5B-Abliterated", "R1-1.5B-Abl"};
+using ActiveModel = nova::Abl1p5B;
 #elif defined(NOVA_MODEL_R1_LLAMA8B)
 inline constexpr const char* kModelName = "DeepSeek-R1-Distill-Llama-8B";
 inline constexpr const char* kModelAliases[] = {"DeepSeek-R1-Distill-Llama-8B", "Llama-3.1-8B"};

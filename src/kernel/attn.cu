@@ -179,7 +179,66 @@ __global__ void fa_combine_kernel(const float* __restrict__ part, float* __restr
     }
 }
 
+// ---- 四路批量 decode attention：一个 warp 一个 (session, head)，一次 launch 覆盖 4 路 ----
+__global__ void attn_batch4_kernel(const float* __restrict__ q4,
+                                   const float* __restrict__ k0, const float* __restrict__ k1,
+                                   const float* __restrict__ k2, const float* __restrict__ k3,
+                                   const float* __restrict__ v0, const float* __restrict__ v1,
+                                   const float* __restrict__ v2, const float* __restrict__ v3,
+                                   float* __restrict__ o4, const int* __restrict__ pos,
+                                   int nh, int nkv, int hd) {
+    const int warp = (int)((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    const int s = warp / nh;
+    if (s >= 4) return;
+    const int h = warp - s * nh;
+    const float* K = (s == 0) ? k0 : (s == 1) ? k1 : (s == 2) ? k2 : k3;
+    const float* V = (s == 0) ? v0 : (s == 1) ? v1 : (s == 2) ? v2 : v3;
+    const int kvh = h / (nh / nkv);
+    const int p_end = pos[s];
+    const float* q  = q4 + (size_t)s * nh * hd + (size_t)h * hd;
+    const float* kb = K + (size_t)kvh * hd;
+    const float* vb = V + (size_t)kvh * hd;
+    float*       ob = o4 + (size_t)s * nh * hd + (size_t)h * hd;
+    const int nper = hd / 32;
+    float m = -1e30f, l = 0.f, acc[4] = {0.f, 0.f, 0.f, 0.f};
+    for (int p = 0; p < p_end; ++p) {
+        const float* kk = kb + (size_t)p * nkv * hd;
+        const float* vv = vb + (size_t)p * nkv * hd;
+        float sc = 0.f;
+        for (int j = 0; j < nper; ++j) sc += q[lane + j * 32] * kk[lane + j * 32];
+        #pragma unroll
+        for (int o2 = 16; o2 > 0; o2 >>= 1) sc += __shfl_xor_sync(0xffffffffu, sc, o2);
+        const float m2 = fmaxf(m, sc);
+        const float e  = __expf(sc - m2);
+        const float corr = (p == 0) ? 0.f : __expf(m - m2);
+        l = l * corr + e;
+        for (int j = 0; j < nper; ++j) acc[j] = acc[j] * corr + e * vv[lane + j * 32];
+        m = m2;
+    }
+    const float inv = l > 0.f ? 1.f / l : 0.f;
+    for (int j = 0; j < nper; ++j) ob[lane + j * 32] = acc[j] * inv;
+}
+// ---- 防掉频：一个 block 空转，给 WDDM 持续负载 ----
+__global__ void keepalive_kernel(unsigned long long cycles) {
+    const unsigned long long t0 = clock64();
+    volatile float sink = 0.f;
+    while (clock64() - t0 < cycles) sink += 1.0f;
+}
 } // namespace
+void launch_keepalive(unsigned long long cycles, cudaStream_t s) {
+    keepalive_kernel<<<1, 32, 0, s>>>(cycles);
+}
+
+void launch_attn_batch4(const float* q4,
+                        const float* k0, const float* k1, const float* k2, const float* k3,
+                        const float* v0, const float* v1, const float* v2, const float* v3,
+                        float* o4, const int* pos, int nh, int nkv, int hd, cudaStream_t st) {
+    const int warps  = nh * 4;
+    const int blocks = (warps + 3) / 4;
+    attn_batch4_kernel<<<blocks, 128, 0, st>>>(q4, k0, k1, k2, k3, v0, v1, v2, v3, o4, pos, nh, nkv, hd);
+}
+
 
 void launch_attn_prefill(const float* q, const float* kc, const float* vc, float* o,
                          int n_q, int n_past, cudaStream_t s) {

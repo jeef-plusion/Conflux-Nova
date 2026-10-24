@@ -27,6 +27,7 @@ public:
         const auto& mg = g.str_array("tokenizer.ggml.merges");
         merge_.reserve(mg.size() * 2);
         for (int i = 0; i < (int)mg.size(); ++i) merge_.emplace(mg[i], i);
+        init_rev();                 // 预先建好反查表，避免多线程首次调用时竞争
     }
 
     std::vector<int> encode(const std::string& text) const {

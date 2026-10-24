@@ -22,6 +22,9 @@ template <int K, int R>
 void launch_gemv(const Q4KWeight& w, const ActQ8& x, float* out, cudaStream_t s);
 
 template <int K, int R>
+void launch_gemv4(const Q4KWeight& w, const int8_t* xq, const float* xd, const int* xs, float* out, cudaStream_t s);
+
+template <int K, int R>
 void mmq_launch(const Q4KWeight& w, const ActQ8& x, float* out, int n, cudaStream_t s);
 
 // 编译期 K/R + 运行期列数：1 列走单列内核，其余按 32 列分块（权重只读一遍/块）
@@ -38,6 +41,13 @@ void launch_kv_store(float* kc, float* vc, const float* k, const float* v, int n
 void launch_rope_table(float* cs, float* sn, cudaStream_t s);
 void launch_rope_batch(float* q, float* k, int n, int64_t pos0, const float* cs, const float* sn, cudaStream_t s);
 void launch_rope(float* q, float* k, int64_t pos, const float* cs, const float* sn, cudaStream_t s);
+void launch_attn_batch4(const float* q4,
+                        const float* k0, const float* k1, const float* k2, const float* k3,
+                        const float* v0, const float* v1, const float* v2, const float* v3,
+                        float* o4, const int* pos, int nh, int nkv, int hd, cudaStream_t st);
+
+void launch_keepalive(unsigned long long cycles, cudaStream_t s);
+
 void launch_attn_decode(const float* q, const float* kc, const float* vc, float* o,
                         int n_past, float* scratch, cudaStream_t s);
 void launch_attn_prefill(const float* q, const float* kc, const float* vc, float* o,
@@ -95,6 +105,13 @@ struct Kernel {
     }
     static void rope(float* q, float* k, int64_t pos, const float* cs, const float* sn, cudaStream_t s) {
         launch_rope(q, k, pos, cs, sn, s);
+    }
+    static void keepalive(unsigned long long cyc, cudaStream_t s) { launch_keepalive(cyc, s); }
+    static void attn_batch4(const float* q4,
+                            const float* k0, const float* k1, const float* k2, const float* k3,
+                            const float* v0, const float* v1, const float* v2, const float* v3,
+                            float* o4, const int* pos, int nh, int nkv, int hd, cudaStream_t s) {
+        launch_attn_batch4(q4, k0, k1, k2, k3, v0, v1, v2, v3, o4, pos, nh, nkv, hd, s);
     }
     static void attn_decode(const float* q, const float* kc, const float* vc, float* o,
                             int n_past, float* scratch, cudaStream_t s) {

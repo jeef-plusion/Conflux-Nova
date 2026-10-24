@@ -33,6 +33,30 @@ uint16_t f2h(float f) {
     return (uint16_t)(sign | ((uint32_t)exp << 10) | (mant >> 13));
 }
 
+#pragma pack(push, 1)
+struct block_q8_0 { uint16_t d; int8_t qs[32]; };   // 34 B / 32 权重
+#pragma pack(pop)
+static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
+
+void dequant_q8_0(const block_q8_0* b, float* y) {
+    const float d = half_to_float(b->d);
+    for (int i = 0; i < 32; ++i) y[i] = d * (float)b->qs[i];
+}
+
+void quantize_q8_0(const float* x, block_q8_0* b) {
+    float amax = 0.f;
+    for (int i = 0; i < 32; ++i) { const float a = std::fabs(x[i]); if (a > amax) amax = a; }
+    const float d = amax / 127.f;
+    b->d = f2h(d ? d : 1e-8f);
+    const float inv = d ? 1.f / d : 0.f;
+    for (int i = 0; i < 32; ++i) {
+        int q = (int)std::lround(x[i] * inv);
+        if (q > 127) q = 127;
+        if (q < -127) q = -127;
+        b->qs[i] = (int8_t)q;
+    }
+}
+
 void dequant_q6k(const block_q6_K* b, float* y) {
     const float d = half_to_float(b->d);
     const uint8_t* ql = b->ql;
@@ -135,7 +159,19 @@ static int selftest() {
         if (rel > worst) worst = rel;
     }
     std::printf("[selftest] q4k encode/decode worst rel_rms = %.4f\n", worst);
-    return worst < 0.08 ? 0 : 1;
+    double worst8 = 0;
+    for (int it = 0; it < 64; ++it) {
+        for (int i = 0; i < 256; ++i) x[i] = (float)((it * 53 + i * 7) % 1000 - 500) / 250.f;
+        block_q8_0 b8[8];
+        for (int k = 0; k < 8; ++k) quantize_q8_0(x + k * 32, b8 + k);
+        for (int k = 0; k < 8; ++k) dequant_q8_0(b8 + k, y + k * 32);
+        double n8 = 0, d8 = 0;
+        for (int i = 0; i < 256; ++i) { const double d = y[i] - x[i]; n8 += d * d; d8 += (double)x[i] * x[i]; }
+        const double rel = std::sqrt(n8 / d8);
+        if (rel > worst8) worst8 = rel;
+    }
+    std::printf("[selftest] q8_0 round-trip worst rel_rms = %.6f\n", worst8);
+    return (worst < 0.08 && worst8 < 5e-3) ? 0 : 1;   // int8 量化理论下限 1/(127*sqrt3)=4.5e-3
 }
 
 int main(int argc, char** argv) {
@@ -154,7 +190,7 @@ int main(int argc, char** argv) {
     uint64_t n_q6 = 0, n_q4 = 0;
     for (const auto& t : g.tensors()) {
         Entry e{&t, (uint32_t)t.type, 0, t.bytes};
-        if (t.type == GgmlType::Q6_K) {
+        if (t.type == GgmlType::Q6_K || t.type == GgmlType::Q8_0) {
             uint64_t n = 1;
             for (uint64_t d : t.ne) n *= d;
             e.type  = (uint32_t)GgmlType::Q4_K;
@@ -225,7 +261,33 @@ int main(int argc, char** argv) {
         }
         in.seekg((std::streamoff)(data_off + t.offset), std::ios::beg);
 
-        if (t.type == GgmlType::Q6_K) {
+        if (t.type == GgmlType::Q8_0) {
+            // 8 个 Q8_0 块 (8 x 34 B = 272 B) -> 1 个 Q4_K 块 (144 B)，严格 1:1
+            const uint64_t nb = t.bytes / 272;
+            uint64_t done = 0;
+            while (done < nb) {
+                const uint64_t n = (nb - done) > 1024 ? 1024 : (nb - done);
+                in.read(ibuf.data(), (std::streamsize)(n * 272));
+                if (!in) { std::fprintf(stderr, "short read Q8_0 at %s\n", t.name.c_str()); return 1; }
+                const block_q8_0* src = (const block_q8_0*)ibuf.data();
+                block_q4_K* dst = (block_q4_K*)obuf.data();
+                for (uint64_t i = 0; i < n; ++i) {
+                    float y[256];
+                    for (int k = 0; k < 8; ++k) dequant_q8_0(src + i * 8 + k, y + k * 32);
+                    quantize_q4k(y, dst + i);
+                    if (i % 64 == 0) {
+                        float back[256];
+                        dequant_block(dst + i, back);
+                        double num = 0, den = 0;
+                        for (int k = 0; k < 256; ++k) { const double d = back[k] - y[k]; num += d * d; den += (double)y[k] * y[k]; }
+                        const double rel = std::sqrt(num / (den + 1e-30));
+                        if (rel > max_rel_seen) max_rel_seen = rel;
+                    }
+                }
+                out.write(obuf.data(), (std::streamsize)(n * 144));
+                done += n;
+            }
+        } else if (t.type == GgmlType::Q6_K) {
             const uint64_t nb = t.bytes / 210;
             uint64_t done = 0;
             while (done < nb) {
