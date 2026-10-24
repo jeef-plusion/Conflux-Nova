@@ -1,0 +1,11 @@
+build/
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.gguf
+*.bin
+
+_*.bat
+clocks.csv
