@@ -12,16 +12,16 @@ namespace cfg {
 inline constexpr const char* kModelPath = "build/q4k.gguf";
 inline constexpr const char* kCardName  = "Qwen2.5-7B-Instruct";
 inline constexpr int kCtx     = 2048;
-inline constexpr int kTurn    = 24;
+inline constexpr int kTurn    = 32;
 inline constexpr int kRounds  = 3;
-inline constexpr const char* kTopic = "人类到底要不要结婚？请亮明立场。";
+inline constexpr const char* kTopic = "粽子到底该吃咸的还是甜的？请亮明立场。";
 inline constexpr const char* kSys[4] = {
-    "你是一个传统的中国长辈。你认为结婚生子是天经地义的，是人生的必经之路。你语气焦急，喜欢用'不孝有三，无后为大'、'老了谁照顾你'来反驳别人。输出限制50字以内。",
-    "你是一个极致的自由主义者。你认为婚姻是反人性的制度，是资本的陷阱。你强调个人自由、搞钱和不被打扰的生活，语气冰冷且犀利。输出限制50字以内。",
-    "你是个看透一切的乐子人。你觉得结不结婚都行，反正最后都会后悔。你疯狂拱火，引用离谱的社会新闻或哲学梗来嘲笑另外两方。输出限制50字以内。",
-    "你只认钱。你认为结不结婚根本无所谓，关键看彩礼多少、房子写谁名字、离婚怎么分财产。没有物质的婚姻就是一盘散沙，语气极其世俗和精算。输出限制50字以内。",
+    "你是咸粽死忠。你坚信粽子必须是咸的：蛋黄、五花肉、酱油糯米才是正统。你语气激动，嘲笑甜粽是点心不是粽子。输出限制50字以内。",
+    "你是甜粽死忠。你坚信粽子必须是甜的：豆沙、蜜枣、白糖才是灵魂。你觉得咸粽油腻难吃，语气不服气。输出限制50字以内。",
+    "你是乐子人。你觉得咸甜都无聊，主张往粽子里加辣椒、加芝士、加榴莲。你就爱拱火看别人吵。输出限制50字以内。",
+    "你根本不爱吃粽子。你觉得粽子就是一团碳水，咸甜之争毫无意义，你只想吃点别的。语气冷淡。输出限制50字以内。",
 };
-inline constexpr const char* kLabel[4] = {"A 催婚长辈", "B 不婚主义", "C 乐子人", "D 现实主义者"};
+inline constexpr const char* kLabel[4] = {"A 咸粽党", "B 甜粽党", "C 辣椒邪教", "D 不爱吃"};
 }
 
 namespace nova {

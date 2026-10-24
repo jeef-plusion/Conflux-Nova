@@ -309,12 +309,11 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
                              bk + i * Model::NKV * Model::HD, bv + i * Model::NKV * Model::HD, 1, it[i].pos, s);
             pv[i] = (int)it[i].pos;
         }
-        cudaMemcpyAsync(bpos, pv, sizeof(pv), cudaMemcpyHostToDevice, s);
-        Kernel::attn_batch4(bq,
-                            it[0].kvk + kvoff, it[1].kvk + kvoff, it[2].kvk + kvoff, it[3].kvk + kvoff,
-                            it[0].kvv + kvoff, it[1].kvv + kvoff, it[2].kvv + kvoff, it[3].kvv + kvoff,
-                            bab, bpos, Model::NH, Model::NKV, Model::HD, s);
-        for (int i = 0; i < N; ++i) Kernel::quant(A(i), bab + i * Model::NH * Model::HD, 1, s);
+        for (int i = 0; i < N; ++i) {
+            Kernel::attn_decode(bq + i * Model::NH * Model::HD, it[i].kvk + kvoff, it[i].kvv + kvoff,
+                                bab + i * Model::NH * Model::HD, (int)it[i].pos, battn_scratch, s);
+            Kernel::quant(A(i), bab + i * Model::NH * Model::HD, 1, s);
+        }
         launch_gemv4<Model::NH * Model::HD, Model::D>(lw.o, bact, bactd, basum, bd, s);
         for (int i = 0; i < N; ++i) Kernel::residual(bx + i * Model::D, bd + i * Model::D, Model::D, s);
 
