@@ -1,11 +1,18 @@
-// code/graph/kv_pool.h — 共享 KV 块池（第 1 步：独占映射，refcnt 恒为 1）
+// code/graph/kv_pool.h — 共享 KV 块池（第 2 步：非连续寻址 / Paged Attention，仍无共享）
 //
-// 布局：pool 由 kMaxSessions 个「切片」组成，每片 = 一个会话的完整 KV：
-//       [layer][token][2][NKV][HD]
-// 切片 = 连续的 nblocks 个物理块（每块 KB 个 token），所以：
-//       物理块号 phys = slice * nblocks + 逻辑块号
-//       切片内地址   = layer * ctx * KVW + (b * KB + slot) * KVW
-// 与改造前的逐会话切片布局完全一致 —— 这是「零语义变更」的前提。
+// 显存布局（两个池各一份，k 与 v 分池存放，等价于 [2] 维拆开）：
+//       pool: [layer][NB][KB][NKV][HD]
+//       NB  = kMaxSessions * nblocks        // 全局物理块数
+//       KB  = kKvBlock（16）                 // 每块 token 数
+//       KVW = NKV * HD                       // 每 token 的 float 数
+// 地址 = pool + ((layer * NB + phys) * KB + slot) * KVW
+//        slot = pos & (KB-1)，phys = table[pos >> kKvBlockShift]
+//
+// 总量与改造前的逐会话切片完全相同（L*NB*KB*KVW == kMaxSessions*span），
+// 所以分配大小一个字节都没变，变的只有寻址：每会话一张块表，块表决定物理块号。
+//
+// 第 1 步的恒等映射（table[b] = slice*nblocks + b）继续保留 —— 每片仍然独占，
+// 只是切片内的地址不再连续，attention 要按块跳。第 3 步才做共享挂载 + COW。
 #pragma once
 #include <cstdint>
 #include <vector>
@@ -20,7 +27,8 @@ struct KvSlice {
     float*   v = nullptr;
     int64_t  n_past = 0;
     int      nblocks = 0;
-    std::vector<int32_t> table;   // 逻辑块 -> 物理块（第 1 步为恒等映射 + 切片基址）
+    std::vector<int32_t> table;    // 逻辑块 -> 物理块（恒等映射 + 切片基址）
+    int32_t*             table_dev = nullptr;   // 同一张表在设备上的副本
 };
 
 class KvPool {
@@ -29,11 +37,15 @@ public:
         ctx_ = ctx;
         nblocks_ = (int)((ctx + kKvBlock - 1) / kKvBlock);
         slices_.clear();
+        slices_.reserve((size_t)n_slices);   // 指针会被 Session 长期持有，禁止搬迁
         free_.clear();
         for (int i = n_slices - 1; i >= 0; --i) free_.push_back(i);   // 先分配 0 号
     }
 
-    // 取一个独占切片：块表做恒等映射，向后兼容连续布局
+    // 设备侧块表总基址（长度 n_slices * nblocks，按 slice 取偏移）
+    void set_dev(int32_t* base) { dev_ = base; }
+
+    // 取一个独占切片：块表做恒等映射，物理块号 = slice*nblocks + b
     KvSlice* acquire() {
         if (free_.empty()) return nullptr;
         const int id = free_.back();
@@ -45,6 +57,7 @@ public:
         s->nblocks = nblocks_;
         s->table.resize((size_t)nblocks_);
         for (int b = 0; b < nblocks_; ++b) s->table[(size_t)b] = (int32_t)(id * nblocks_ + b);
+        s->table_dev = dev_ ? dev_ + (size_t)id * (size_t)nblocks_ : nullptr;
         return s;
     }
 
@@ -67,8 +80,9 @@ public:
     int      free_slices() const { return (int)free_.size(); }
 
 private:
-    int64_t ctx_ = 0;
-    int     nblocks_ = 0;
+    int64_t  ctx_ = 0;
+    int      nblocks_ = 0;
+    int32_t* dev_ = nullptr;
     std::vector<KvSlice> slices_;
     std::vector<int>     free_;
 };

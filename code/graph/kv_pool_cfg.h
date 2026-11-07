@@ -18,7 +18,7 @@ namespace nova {
 constexpr int kKvBlock = NOVA_KV_BLOCK;
 
 static_assert(kKvBlock == 8 || kKvBlock == 16 || kKvBlock == 32 || kKvBlock == 64,
-              "NOVA_KV_BLOCK 必须是 8 / 16 / 32 / 64 之一");
+              "NOVA_KV_BLOCK must be one of 8 / 16 / 32 / 64");
 
 constexpr int kKvBlockShift = (kKvBlock == 8)  ? 3
                             : (kKvBlock == 16) ? 4
@@ -26,7 +26,7 @@ constexpr int kKvBlockShift = (kKvBlock == 8)  ? 3
                                                : 6;
 constexpr int kKvBlockMask = kKvBlock - 1;
 
-static_assert((1 << kKvBlockShift) == kKvBlock, "移位量与块大小不一致");
+static_assert((1 << kKvBlockShift) == kKvBlock, "shift does not match block size");
 
 // 逻辑位置 -> (块表下标, 块内槽位)
 inline int kv_block_index(int64_t pos) { return (int)(pos >> kKvBlockShift); }

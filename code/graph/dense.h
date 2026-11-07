@@ -10,17 +10,19 @@
 namespace nova {
 namespace graph {
 
-// 执行一层所需的全部上下文：本会话 workspace + 本层权重 + 本会话 KV 切片
+// 执行一层所需的全部上下文：本会话 workspace + 本层权重 + 共享 KV 块池 + 本会话块表
 struct LayerCtx {
-    Workspace&    w;
-    const LayerW& lw;
-    Profiler&     prof;
-    int           n;       // 列数：decode = 1，prefill = n
-    int64_t       pos0;
-    float*        kvk;
-    float*        kvv;
-    int64_t       kvoff;   // 本层 KV 在会话 KV 里的偏移
-    const float*  rcs;     // RoPE cos 表（引擎级只读，已按 theta 生成）
+    Workspace&     w;
+    const LayerW&  lw;
+    Profiler&      prof;
+    int            n;       // 列数：decode = 1，prefill = n
+    int64_t        pos0;
+    float*         pool_k;  // 共享块池基址：[layer][NB][KB][NKV][HD]
+    float*         pool_v;
+    const int32_t* table;   // 本会话块表（设备，长度 nblocks）
+    int            layer;   // 当前层号
+    int            nb;      // 全局物理块数 NB
+    const float*   rcs;     // RoPE cos 表（引擎级只读，已按 theta 生成）
     const float*  rsn;     // RoPE sin 表
     ActQ8         A;       // D 宽激活量化暂存
     ActQ8         A2;      // FFN 宽激活量化暂存
@@ -69,7 +71,8 @@ struct RopeKvOp {
     static void run(LayerCtx& c) {
         c.prof.begin(PH_ROPE);
         Kernel::rope_batch(c.w.qb, c.w.kb, c.n, c.pos0, c.rcs, c.rsn, c.w.s);
-        Kernel::kv_store(c.kvk + c.kvoff, c.kvv + c.kvoff, c.w.kb, c.w.vb, c.n, c.pos0, c.w.s);
+        Kernel::kv_store_paged(c.pool_k, c.pool_v, c.table, c.layer, c.nb, kKvBlockShift,
+                               c.n, c.pos0, c.w.kb, c.w.vb, c.w.s);
         c.prof.end();
     }
 };
@@ -78,10 +81,10 @@ struct RopeKvOp {
 struct AttnOp {
     static void run(LayerCtx& c) {
         c.prof.begin(PH_ATTN);
-        if (c.n == 1) Kernel::attn_decode(c.w.qb, c.kvk + c.kvoff, c.kvv + c.kvoff, c.w.ab,
-                                          (int)c.pos0, c.w.attn_scratch, c.w.s);
-        else          Kernel::attn_prefill(c.w.qb, c.kvk + c.kvoff, c.kvv + c.kvoff, c.w.ab,
-                                           c.n, (int)c.pos0, c.w.s);
+        if (c.n == 1) Kernel::attn_decode_paged(c.w.qb, c.pool_k, c.pool_v, c.table, c.layer, c.nb,
+                                                kKvBlockShift, (int)c.pos0 + 1, c.w.ab, c.w.attn_scratch, c.w.s);
+        else          Kernel::attn_prefill_paged(c.w.qb, c.pool_k, c.pool_v, c.table, c.layer, c.nb,
+                                                 kKvBlockShift, c.n, (int)c.pos0, c.w.ab, c.w.s);
         c.prof.end();
     }
 };

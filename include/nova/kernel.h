@@ -38,6 +38,12 @@ void launch_embed(float* x, const uint8_t* emb, const int* ids, int n, cudaStrea
 void launch_bias(float* y, const float* b, int n, int cols, cudaStream_t s);
 void launch_kv_store(float* kc, float* vc, const float* k, const float* v, int n, int64_t pos0, cudaStream_t s);
 
+// ---- Paged KV：池基址 + 块表 + 层号 + NB，地址按块表算 ----
+// kb_shift 由 host 传（= nova::kKvBlockShift）：.cu 侧不能 include graph/kv_pool_cfg.h，
+// 因为 nvcc 的预处理器按本地代码页解码源文件，那里的中文字符串会吞掉收尾引号。
+void launch_kv_store_paged(float* pool_k, float* pool_v, const int32_t* table, int layer, int nb,
+                           int kb_shift, int n, int64_t pos0, const float* k, const float* v, cudaStream_t s);
+
 void launch_rope_table(float* cs, float* sn, cudaStream_t s);
 void launch_rope_batch(float* q, float* k, int n, int64_t pos0, const float* cs, const float* sn, cudaStream_t s);
 void launch_rope(float* q, float* k, int64_t pos, const float* cs, const float* sn, cudaStream_t s);
@@ -52,6 +58,13 @@ void launch_attn_decode(const float* q, const float* kc, const float* vc, float*
                         int n_past, float* scratch, cudaStream_t s);
 void launch_attn_prefill(const float* q, const float* kc, const float* vc, float* o,
                          int n_q, int n_past, cudaStream_t s);
+
+void launch_attn_decode_paged(const float* q, const float* pool_k, const float* pool_v,
+                              const int32_t* table, int layer, int nb, int kb_shift, int n_keys,
+                              float* o, float* scratch, cudaStream_t s);
+void launch_attn_prefill_paged(const float* q, const float* pool_k, const float* pool_v,
+                               const int32_t* table, int layer, int nb, int kb_shift,
+                               int n_q, int n_past, float* o, cudaStream_t s);
 void launch_sample(const float* logits, int* tok, cudaStream_t s);
 
 // ---- 模型层：直接点名张量，没有"第几个投影"这种运行期信息 ----
@@ -89,6 +102,11 @@ struct Kernel {
     static void kv_store(float* kc, float* vc, const float* k, const float* v, int n, int64_t pos0, cudaStream_t s) {
         launch_kv_store(kc, vc, k, v, n, pos0, s);
     }
+    // Paged：一条 lane 照旧，只把目标地址换成 ((layer*NB + table[p>>4])*KB + (p&15))*KVW
+    static void kv_store_paged(float* pool_k, float* pool_v, const int32_t* table, int layer, int nb,
+                               int kb_shift, int n, int64_t pos0, const float* k, const float* v, cudaStream_t s) {
+        launch_kv_store_paged(pool_k, pool_v, table, layer, nb, kb_shift, n, pos0, k, v, s);
+    }
     // 任意列数（prefill 分块跑 32 列，decode 走单列）
     static void q_proj_n (const Q4KWeight& w, const ActQ8& a, float* o, int n, cudaStream_t s) { gemm_q4k<D, NH * HD>(w, a, o, n, s); }
     static void k_proj_n (const Q4KWeight& w, const ActQ8& a, float* o, int n, cudaStream_t s) { gemm_q4k<D, NKV * HD>(w, a, o, n, s); }
@@ -120,6 +138,16 @@ struct Kernel {
     static void attn_prefill(const float* q, const float* kc, const float* vc, float* o,
                              int n_q, int n_past, cudaStream_t s) {
         launch_attn_prefill(q, kc, vc, o, n_q, n_past, s);
+    }
+    static void attn_decode_paged(const float* q, const float* pool_k, const float* pool_v,
+                                  const int32_t* table, int layer, int nb, int kb_shift, int n_keys,
+                                  float* o, float* scratch, cudaStream_t s) {
+        launch_attn_decode_paged(q, pool_k, pool_v, table, layer, nb, kb_shift, n_keys, o, scratch, s);
+    }
+    static void attn_prefill_paged(const float* q, const float* pool_k, const float* pool_v,
+                                   const int32_t* table, int layer, int nb, int kb_shift,
+                                   int n_q, int n_past, float* o, cudaStream_t s) {
+        launch_attn_prefill_paged(q, pool_k, pool_v, table, layer, nb, kb_shift, n_q, n_past, o, s);
     }
     static void sample(const float* logits, int* tok, cudaStream_t s) { launch_sample(logits, tok, s); }
 };

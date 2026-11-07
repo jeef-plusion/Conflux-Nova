@@ -14,7 +14,7 @@ inline void INPUT_START(Session* s) {
 
     using clk = std::chrono::steady_clock;
     const auto t0 = clk::now();
-    e.prefill(s->ws, s->prompt_ids.data(), n_new, s->kvk, s->kvv, s->pos0);
+    e.prefill(s->ws, s->prompt_ids.data(), n_new, s->table_dev, s->pos0);
     const auto t1 = clk::now();
 
     int64_t p = s->pos0 + n_new;
@@ -23,7 +23,7 @@ inline void INPUT_START(Session* s) {
     while ((int)s->out_ids.size() < s->max_new && tok != im_end) {
         s->out_ids.push_back(tok);
         OUT_TKZ(s);
-        tok = e.decode(s->ws, tok, s->kvv ? s->kvk : s->kvk, s->kvv, p);
+        tok = e.decode(s->ws, tok, s->table_dev, p);
         ++p;
     }
     const auto t2 = clk::now();

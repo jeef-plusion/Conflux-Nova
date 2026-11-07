@@ -19,11 +19,10 @@ struct Msg { std::string role, content; };
 struct Session {
     int      id       = -1;
     int64_t  n_past   = 0;
-    float*   kvk      = nullptr;
-    float*   kvv      = nullptr;
     bool     kv_valid = false;
     std::vector<Msg> history;
-    KvSlice*         kslice = nullptr;   // 块池里的独占切片
+    KvSlice*         kslice    = nullptr;   // 块池里的独占切片
+    int32_t*         table_dev = nullptr;   // 本会话的块表（设备，长度 nblocks）
 
     Workspace ws;              // 本会话独占的激活缓冲 + stream
     std::string obuf;          // 本会话输出缓冲（防串台）
@@ -78,6 +77,8 @@ public:
         engine_ = e;
         for (int i = 0; i < kMaxSessions; ++i) used_[i] = false;
         kv_pool().init(kMaxSessions, kMaxCtx);
+        // 块表一次性放进 arena，按 slice 取偏移；每个会话一张 length=nblocks 的表
+        kv_pool().set_dev(e->kv_table_slot(0));
     }
 
     Session* create(const ModelCard* card, Tokenizer* tk, int max_new) {
@@ -89,14 +90,32 @@ public:
 
         auto s = std::make_unique<Session>();
         s->id = slot; s->card = card; s->tk = tk; s->engine = engine_; s->max_new = max_new;
-        s->kvk = engine_->kv_k_slot(slot);
-        s->kvv = engine_->kv_v_slot(slot);
 
         NOVA_CU(cudaStreamCreate(&s->ws.s));
         engine_->make_workspace(&s->ws, kSessCtx, s->ws.s);
 
-        NOVA_CU(cudaMemset(s->kvk, 0, (size_t)Engine::kv_span() * sizeof(float)));
-        NOVA_CU(cudaMemset(s->kvv, 0, (size_t)Engine::kv_span() * sizeof(float)));
+        // 独占切片 + 块表上设备
+        s->kslice = kv_pool().acquire();
+        if (!s->kslice) { std::fprintf(stderr, "[ERROR] KV 块池已空\n"); std::exit(3); }
+        s->table_dev = s->kslice->table_dev;
+        NOVA_CU(cudaMemcpyAsync(s->table_dev, s->kslice->table.data(),
+                                (size_t)s->kslice->nblocks * sizeof(int32_t),
+                                cudaMemcpyHostToDevice, s->ws.s));
+
+        // 清零本会话自己的物理块：块池是共享的，绝不能整片 memset。
+        // 第 2 步的块表是「切片内恒等」，所以这里按块逐个清（总量与改造前一致）。
+        {
+            const size_t blkf = (size_t)kKvBlock * (size_t)Engine::kv_width();
+            for (int l = 0; l < Model::L; ++l) {
+                const size_t loff = (size_t)l * (size_t)Engine::kv_nb();
+                for (int b = 0; b < s->kslice->nblocks; ++b) {
+                    const size_t off = (loff + (size_t)s->kslice->table[(size_t)b]) * blkf;
+                    NOVA_CU(cudaMemsetAsync(engine_->kv_k_base() + off, 0, blkf * sizeof(float), s->ws.s));
+                    NOVA_CU(cudaMemsetAsync(engine_->kv_v_base() + off, 0, blkf * sizeof(float), s->ws.s));
+                }
+            }
+            NOVA_CU(cudaStreamSynchronize(s->ws.s));
+        }
 
         Session* raw = s.get();
         live_.push_back(std::move(s));

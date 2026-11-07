@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
                 pos0 = s[i]->n_past;
             }
             auto ids = nova::encode_chat(tk, delta);
-            engine.prefill(s[i]->ws, ids.data(), (int)ids.size(), s[i]->kvk, s[i]->kvv, pos0);
+            engine.prefill(s[i]->ws, ids.data(), (int)ids.size(), s[i]->table_dev, pos0);
             s[i]->n_past = pos0 + (int64_t)ids.size();
             s[i]->kv_valid = true;
             s[i]->out_ids.clear();
@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < N; ++i) { last[i] = s[i]->out_ids[0]; done[i] = (last[i] == im_end); }
         nova::Engine::BatchItem bi[N];
         for (int t = 1; t < cfg::kTurn; ++t) {
-            for (int i = 0; i < N; ++i) bi[i] = nova::Engine::BatchItem{last[i], s[i]->kvk, s[i]->kvv, s[i]->n_past, 0};
+            for (int i = 0; i < N; ++i) bi[i] = nova::Engine::BatchItem{last[i], s[i]->table_dev, s[i]->n_past, 0};
             engine.decode_batch(bi, N, s[0]->ws.s);
             for (int i = 0; i < N; ++i) {
                 last[i] = bi[i].tok_out; ++s[i]->n_past;

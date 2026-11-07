@@ -15,9 +15,13 @@ int main(int argc, char** argv) {
 
     cudaStream_t s; cudaStreamCreate(&s);
     nova::Workspace ws; e.make_workspace(&ws, nova::kSessCtx, s);
-    float* kvk = e.kv_k_slot(0); float* kvv = e.kv_v_slot(0);
-    cudaMemset(kvk, 0, (size_t)nova::Engine::kv_span() * 4);
-    cudaMemset(kvv, 0, (size_t)nova::Engine::kv_span() * 4);
+    // 共享块池：整池清零，再用一张恒等块表（slice 0）
+    int32_t* table = e.kv_table_slot(0);
+    std::vector<int32_t> tab((size_t)nova::Engine::kv_nblocks());
+    for (int b = 0; b < nova::Engine::kv_nblocks(); ++b) tab[(size_t)b] = b;
+    cudaMemcpy(table, tab.data(), tab.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemset(e.kv_k_base(), 0, (size_t)nova::Engine::kv_nb() * nova::kKvBlock * nova::Engine::kv_width() * 4);
+    cudaMemset(e.kv_v_base(), 0, (size_t)nova::Engine::kv_nb() * nova::kKvBlock * nova::Engine::kv_width() * 4);
 
     std::vector<int> ids;
     if (argc > 3 && std::string(argv[3]) == "chat") {
@@ -36,7 +40,7 @@ int main(int argc, char** argv) {
     for (int id : ids) std::printf("%d ", id);
     std::printf("\n");
 
-    e.prefill(ws, ids.data(), (int)ids.size(), kvk, kvv, 0);
+    e.prefill(ws, ids.data(), (int)ids.size(), table, 0);
     std::vector<float> lg(nova::Model::V);
     cudaMemcpy(lg.data(), ws.logits, lg.size() * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -60,7 +64,7 @@ int main(int argc, char** argv) {
         for (auto& ch : piece) if (ch == '\n') ch = ' ';
         std::printf("%s", piece.c_str());
         std::fflush(stdout);
-        tok = e.decode(ws, tok, kvk, kvv, pos);
+        tok = e.decode(ws, tok, table, pos);
         ++pos;
     }
     std::printf("\"\n[probe] n_past=%lld\n", (long long)pos);

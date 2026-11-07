@@ -1,5 +1,12 @@
 // nova_v2/src/kernel/attn.cu — decode: KV 切段并行 + combine；prefill: flash
 // split-K 结构参考 Conflux-Nova 的 fa_split/fa_combine：part[head][split][m,l,acc...]
+//
+// Paged 版（fa_split_paged / flash_paged）把「连续切片」换成「共享块池 + 块表」：
+//   外层按块走：phys = __ldg(table + (p >> kb_shift))，只取一次；
+//   内层块内 KB 个 slot 连续：地址 = 块基址 + slot * (NKV*HD) + kvh*HD，
+//   槽位随 p 自增，内层没有任何查表、除法或取模。
+// 每个 p 的浮点运算序列与连续版逐条相同（同一个 p 顺序、同一批 fmaf/__expf），
+// 所以输出与连续版逐位相同。
 #include "nova/kernel.h"
 
 namespace nova {
@@ -182,6 +189,172 @@ __global__ void fa_combine_kernel(const float* __restrict__ part, float* __restr
     }
 }
 
+
+// ---------------- decode（paged）：与 fa_split_kernel 同式，只换寻址 ----------------
+// 段划分（nsplit / chunk / 每 warp 的 1/4 段）与连续版完全一致，
+// 所以每个 p 的先后顺序不变 —— 这是逐位等价的前提。
+__global__ void fa_split_paged_kernel(const float* __restrict__ q,
+                                      const float* __restrict__ pool_k,
+                                      const float* __restrict__ pool_v,
+                                      const int32_t* __restrict__ table,
+                                      float* __restrict__ part,
+                                      int n_keys, int chunk, float scale, int nsplit,
+                                      int layer, int nb, int kb_shift) {
+    __shared__ float s_q[HD];
+    __shared__ float spart[4][HD + 2];
+
+    const int tid  = (int)threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int head = (int)blockIdx.y;
+    const int sp   = (int)blockIdx.x;
+    const int kvh  = head / (NH / NKV);
+
+    const int q4 = (chunk + 3) >> 2;                 // 每个 warp 扫 1/4 段
+    const int kv0 = sp * chunk + warp * q4;
+    int kv1 = kv0 + q4;
+    if (kv1 > n_keys) kv1 = n_keys;
+    if (kv1 > (sp + 1) * chunk) kv1 = (sp + 1) * chunk;
+
+    if (tid < HD) s_q[tid] = q[head * HD + tid];
+    __syncthreads();
+
+    float m = -INFINITY, l = 0.f;
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+
+    const float* qh = s_q;
+    constexpr int64_t KW = (int64_t)NKV * HD;        // 每 token 的 float 数（每个池）
+    const int64_t kb   = (int64_t)1 << kb_shift;     // 块大小 KB（host 传进来，见 .cu 顶部说明）
+    const int     mask = (int)(kb - 1);
+
+    // 外层：块 —— 块号只在这里取一次
+    const int64_t bl = (kv1 > kv0) ? ((int64_t)kv1 - 1) >> kb_shift : -1;
+    for (int64_t b = (int64_t)kv0 >> kb_shift; b <= bl; ++b) {
+        const int     phys = __ldg(table + b);
+        const float*  kblk = pool_k + (((int64_t)layer * nb + phys) * kb) * KW;
+        const float*  vblk = pool_v + (((int64_t)layer * nb + phys) * kb) * KW;
+        int64_t p0 = b * kb;
+        int64_t p1 = p0 + kb;
+        if (p0 < (int64_t)kv0) p0 = kv0;
+        if (p1 > (int64_t)kv1) p1 = kv1;
+        // 内层：块内 slot 连续，槽位随 p 自增（不查表、不除、不取模）
+        int slot = (int)(p0 & mask);
+        for (int64_t p = p0; p < p1; ++p, ++slot) {
+            const float* kp = kblk + ((int64_t)slot * NKV + kvh) * HD;
+            float part_d = 0.f;
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) part_d = fmaf(qh[lane + 32 * c], kp[lane + 32 * c], part_d);
+            const float qk = warp_sum(part_d) * scale;
+
+            const float mn = fmaxf(m, qk);
+            const float corr = __expf(m - mn);
+            const float pr = __expf(qk - mn);
+            l = fmaf(l, corr, pr);
+
+            const float* vp = vblk + ((int64_t)slot * NKV + kvh) * HD;
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) acc[c] = fmaf(acc[c], corr, pr * vp[lane + 32 * c]);
+            m = mn;
+        }
+    }
+
+    // block 内 4 个 warp 先合并，避免把 4 份 partial 全写回显存
+    if (lane == 0) { spart[warp][0] = m; spart[warp][1] = l; }
+    #pragma unroll
+    for (int c = 0; c < 4; ++c) spart[warp][2 + lane + c * 32] = acc[c];
+    __syncthreads();
+
+    if (warp == 0) {
+        float mm = -INFINITY;
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) mm = fmaxf(mm, spart[w][0]);
+        float ll = 0.f;
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            const float ls = spart[w][1];
+            if (ls > 0.f) ll = fmaf(ls, __expf(spart[w][0] - mm), ll);
+        }
+        float* out = part + ((size_t)head * nsplit + sp) * (HD + 2);
+        if (lane == 0) { out[0] = mm; out[1] = ll; }
+        #pragma unroll
+        for (int c = 0; c < 4; ++c) {
+            const int dc = 2 + lane + c * 32;
+            float a = 0.f;
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) a = fmaf(spart[w][dc], __expf(spart[w][0] - mm), a);
+            out[dc] = a;
+        }
+    }
+}
+
+// ---------------- prefill（paged）：与 flash_kernel 同式，只换寻址 ----------------
+template <bool SWA>
+__global__ void flash_paged_kernel(const float* __restrict__ q,
+                                   const float* __restrict__ pool_k,
+                                   const float* __restrict__ pool_v,
+                                   const int32_t* __restrict__ table,
+                                   float* __restrict__ out,
+                                   int n_q, int n_past, float scale, int layer, int nb, int kb_shift) {
+    const int lane = threadIdx.x & 31;
+    const int warp = (int)((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
+    if (warp >= NH * n_q) return;
+
+    const int head = warp / n_q;
+    const int qi   = warp - head * n_q;
+    const int kvh  = head / (NH / NKV);
+    const int64_t pos = (int64_t)n_past + qi;
+
+    const float* qp = q + ((int64_t)qi * NH + head) * HD;
+    float qreg[4];
+    #pragma unroll
+    for (int t = 0; t < 4; ++t) qreg[t] = (t < ND) ? qp[lane + 32 * t] : 0.f;
+
+    float m = -INFINITY, l = 0.f;
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+
+    int64_t start = 0;
+    if constexpr (SWA) start = (pos - kCtx + 1 > 0) ? pos - kCtx + 1 : 0;
+
+    constexpr int64_t KW = (int64_t)NKV * HD;
+    const int64_t kb   = (int64_t)1 << kb_shift;
+    const int     mask = (int)(kb - 1);
+    const int64_t last = pos;
+
+    // 外层：块；内层：块内 slot 连续（槽位随 p 自增）
+    int64_t p = start;
+    while (p <= last) {
+        const int64_t b    = p >> kb_shift;
+        const int     phys = __ldg(table + b);
+        const float*  kblk = pool_k + (((int64_t)layer * nb + phys) * kb) * KW;
+        const float*  vblk = pool_v + (((int64_t)layer * nb + phys) * kb) * KW;
+        int64_t p1 = (b + 1) * kb;
+        if (p1 > last + 1) p1 = last + 1;
+        int slot = (int)(p & mask);
+        for (; p < p1; ++p, ++slot) {
+            const float* kp = kblk + ((int64_t)slot * NKV + kvh) * HD;
+            float part = 0.f;
+            #pragma unroll
+            for (int t = 0; t < 4; ++t) if (t < ND) part = fmaf(qreg[t], kp[lane + 32 * t], part);
+            const float qk = warp_sum(part) * scale;
+
+            const float mn = fmaxf(m, qk);
+            const float e  = __expf(m - mn);
+            const float pe = __expf(qk - mn);
+            l = fmaf(l, e, pe);
+
+            const float* vp = vblk + ((int64_t)slot * NKV + kvh) * HD;
+            #pragma unroll
+            for (int t = 0; t < 4; ++t) if (t < ND) acc[t] = fmaf(acc[t], e, pe * vp[lane + 32 * t]);
+            m = mn;
+        }
+    }
+
+    float* op = out + ((int64_t)qi * NH + head) * HD;
+    const float inv = 1.f / l;
+    #pragma unroll
+    for (int t = 0; t < 4; ++t) if (t < ND) op[lane + 32 * t] = acc[t] * inv;
+}
+
 // ---- 四路批量 decode attention：一个 block 管一个 (session, head)，block 内 BW 个 warp 切 KV ----
 // 上界语义以 launcher 的参考实现为准：launch_attn_decode 里 n_keys = n_past + 1，
 // fa_split_kernel 的 p 从 0 扫到 n_keys-1，即"解码第 pos 个位置时 KV 里已有 pos+1 个位置"
@@ -318,6 +491,36 @@ void launch_attn_decode(const float* q, const float* kc, const float* vc, float*
     dim3 grid((unsigned)nsplit, (unsigned)NH);
     fa_split_kernel<<<grid, 128, 0, s>>>(q, kc, vc, scratch, n_keys, chunk, scale, nsplit);
     fa_combine_kernel<<<NH, HD, 0, s>>>(scratch, o, nsplit);
+}
+
+// paged：段划分与 launch_attn_decode 一字不差，只把「池基址 + 块表 + 层号 + NB」传进去
+void launch_attn_decode_paged(const float* q, const float* pool_k, const float* pool_v,
+                              const int32_t* table, int layer, int nb, int kb_shift, int n_keys,
+                              float* o, float* scratch, cudaStream_t s) {
+    constexpr float scale = kScale;
+
+    int nsplit = (n_keys + 31) / 32;
+    if (nsplit > MAXSPLIT) nsplit = MAXSPLIT;
+    if (nsplit < 1) nsplit = 1;
+    const int chunk = (n_keys + nsplit - 1) / nsplit;
+
+    dim3 grid((unsigned)nsplit, (unsigned)NH);
+    fa_split_paged_kernel<<<grid, 128, 0, s>>>(q, pool_k, pool_v, table, scratch,
+                                               n_keys, chunk, scale, nsplit, layer, nb, kb_shift);
+    fa_combine_kernel<<<NH, HD, 0, s>>>(scratch, o, nsplit);
+}
+
+void launch_attn_prefill_paged(const float* q, const float* pool_k, const float* pool_v,
+                               const int32_t* table, int layer, int nb, int kb_shift,
+                               int n_q, int n_past, float* o, cudaStream_t s) {
+    constexpr float scale = kScale;
+    const int warps = NH * n_q;
+    if constexpr (ArchTraits<typename Model::arch>::kMask == MaskKind::Causal)
+        flash_paged_kernel<false><<<(warps + 3) / 4, 128, 0, s>>>(q, pool_k, pool_v, table, o,
+                                                                 n_q, n_past, scale, layer, nb, kb_shift);
+    else
+        flash_paged_kernel<true><<<(warps + 3) / 4, 128, 0, s>>>(q, pool_k, pool_v, table, o,
+                                                                n_q, n_past, scale, layer, nb, kb_shift);
 }
 
 } // namespace nova

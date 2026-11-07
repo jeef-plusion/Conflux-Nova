@@ -91,6 +91,8 @@ void Engine::load(const std::string& path) {
 
     kv_k_pool_ = arena_.alloc<float>((size_t)kMaxSessions * kv_span());
     kv_v_pool_ = arena_.alloc<float>((size_t)kMaxSessions * kv_span());
+    // 每会话一张块表（int32 × nblocks），一次性放进 arena，按 slice 取偏移
+    kv_table_  = arena_.alloc<int32_t>((size_t)kMaxSessions * kv_nblocks());
     bx  = arena_.alloc<float>(4ull * Model::D);
     bh  = arena_.alloc<float>(4ull * Model::D);
     bq  = arena_.alloc<float>(4ull * Model::NH * Model::HD);
@@ -146,19 +148,19 @@ void Engine::make_workspace(Workspace* wp, int n_max, cudaStream_t s) {
     w.ids = arena_.alloc<int>((size_t)n_max);
 }
 
-void Engine::prefill(Workspace& w, const int* ids, int n, float* kvk, float* kvv, int64_t pos0) {
+void Engine::prefill(Workspace& w, const int* ids, int n, const int32_t* table, int64_t pos0) {
     NOVA_REQUIRE(n <= w.n_max);
     NOVA_CU(cudaMemcpyAsync(w.ids, ids, (size_t)n * sizeof(int), cudaMemcpyHostToDevice, w.s));
     Kernel::embed(w.x, tok_embd_, w.ids, n, w.s);
-    for (int l = 0; l < Model::L; ++l) layer(w, l, n, pos0, kvk, kvv);
+    for (int l = 0; l < Model::L; ++l) layer(w, l, n, pos0, table);
     head(w, n);
     NOVA_CU(cudaStreamSynchronize(w.s));
 }
 
-int Engine::decode(Workspace& w, int id, float* kvk, float* kvv, int64_t pos) {
+int Engine::decode(Workspace& w, int id, const int32_t* table, int64_t pos) {
     NOVA_CU(cudaMemcpyAsync(w.ids, &id, sizeof(int), cudaMemcpyHostToDevice, w.s));
     Kernel::embed(w.x, tok_embd_, w.ids, 1, w.s);
-    for (int l = 0; l < Model::L; ++l) layer(w, l, 1, pos, kvk, kvv);
+    for (int l = 0; l < Model::L; ++l) layer(w, l, 1, pos, table);
     head(w, 1);
     return sample_last(w);
 }
@@ -200,11 +202,12 @@ int Engine::sample_last(Workspace& w) {
     return pick;
 }
 
-void Engine::layer(Workspace& w, int l, int n, int64_t pos0, float* kvk, float* kvv) {
+void Engine::layer(Workspace& w, int l, int n, int64_t pos0, const int32_t* table) {
     // 一层的算子顺序由计算图层在编译期给出（code/graph/），这里只负责摆好上下文。
     // 具体序列：graph::ActiveGraph::ops（qwen2.h / llama.h），执行：dense.h 的 DenseLayer。
-    graph::LayerCtx c{w, layers_[l], prof, n, pos0, kvk, kvv,
-                      (int64_t)l * kMaxCtx * Model::NKV * Model::HD,
+    // KV 侧只传「共享池基址 + 本会话块表 + 层号 + NB」，层内偏移由块表算，不再是 kvoff。
+    graph::LayerCtx c{w, layers_[l], prof, n, pos0,
+                      kv_k_pool_, kv_v_pool_, table, l, kv_nb(),
                       rcs_, rsn_,
                       ActQ8{w.act, w.actd, w.asum},
                       ActQ8{w.act2, w.act2d, w.asum2}};
@@ -232,7 +235,7 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
 
     for (int l = 0; l < Model::L; ++l) {
         const LayerW& lw = layers_[l];
-        const int64_t kvoff = (int64_t)l * kMaxCtx * Model::NKV * Model::HD;
+        const int nb = kv_nb();
 
         for (int i = 0; i < N; ++i) {
             Kernel::rms_norm(bh + i * Model::D, bx + i * Model::D, lw.attn_norm, 1, s);
@@ -249,12 +252,14 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
                 Kernel::bias(bv + i * Model::NKV * Model::HD, lw.vb, Model::NKV * Model::HD, Model::NKV * Model::HD, s);
             }
             Kernel::rope_batch(bq + i * Model::NH * Model::HD, bk + i * Model::NKV * Model::HD, 1, it[i].pos, rcs_, rsn_, s);
-            Kernel::kv_store(it[i].kvk + kvoff, it[i].kvv + kvoff,
-                             bk + i * Model::NKV * Model::HD, bv + i * Model::NKV * Model::HD, 1, it[i].pos, s);
+            Kernel::kv_store_paged(kv_k_pool_, kv_v_pool_, it[i].table, l, nb, kKvBlockShift,
+                                  1, it[i].pos,
+                                  bk + i * Model::NKV * Model::HD, bv + i * Model::NKV * Model::HD, s);
         }
         for (int i = 0; i < N; ++i) {
-            Kernel::attn_decode(bq + i * Model::NH * Model::HD, it[i].kvk + kvoff, it[i].kvv + kvoff,
-                                bab + i * Model::NH * Model::HD, (int)it[i].pos, battn_scratch, s);
+            Kernel::attn_decode_paged(bq + i * Model::NH * Model::HD, kv_k_pool_, kv_v_pool_,
+                                      it[i].table, l, nb, kKvBlockShift, (int)it[i].pos + 1,
+                                      bab + i * Model::NH * Model::HD, battn_scratch, s);
             Kernel::quant(A(i), bab + i * Model::NH * Model::HD, 1, s);
         }
         launch_gemv4<Model::NH * Model::HD, Model::D>(lw.o, bact, bactd, basum, bd, s);
