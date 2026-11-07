@@ -274,13 +274,13 @@ void Engine::decode_batch(BatchItem* it, int n, cudaStream_t s) {
                 Kernel::bias(bv + i * Model::NKV * Model::HD, lw.vb, Model::NKV * Model::HD, Model::NKV * Model::HD, s);
             }
             Kernel::rope_batch(bq + i * Model::NH * Model::HD, bk + i * Model::NKV * Model::HD, 1, it[i].pos, rcs_, rsn_, s);
-            Kernel::kv_store_paged(kv_k_pool_, kv_v_pool_, it[i].table, l, nb, kKvBlockShift,
+            Kernel::kv_store_paged(kv_k_pool_, kv_v_pool_, it[i].table, l, nb,
                                   1, it[i].pos,
                                   bk + i * Model::NKV * Model::HD, bv + i * Model::NKV * Model::HD, s);
         }
         for (int i = 0; i < N; ++i) {
             Kernel::attn_decode_paged(bq + i * Model::NH * Model::HD, kv_k_pool_, kv_v_pool_,
-                                      it[i].table, l, nb, kKvBlockShift, (int)it[i].pos + 1,
+                                      it[i].table, l, nb, (int)it[i].pos + 1,
                                       bab + i * Model::NH * Model::HD, battn_scratch, s);
             Kernel::quant(A(i), bab + i * Model::NH * Model::HD, 1, s);
         }

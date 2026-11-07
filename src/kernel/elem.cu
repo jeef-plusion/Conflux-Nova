@@ -1,5 +1,6 @@
 // nova_v2/src/kernel/elem.cu — 取词向量 / bias / KV 写入
 #include "nova/kernel.h"
+#include "graph/kv_pool_cfg.h"
 #include "nova/quant/q4_k.h"
 
 namespace nova {
@@ -52,20 +53,20 @@ __global__ void kv_store_kernel(float* __restrict__ kc, float* __restrict__ vc,
 //   pool + ((layer*NB + phys)*KB + slot) * KVW，phys 来自本会话块表。
 // 写进去的 float 与旧版逐位相同（同一份 k/v，同一个值），只是落点换了。
 //
-// kb_shift 由 host 传（= nova::kKvBlockShift，唯一定义在 graph/kv_pool_cfg.h）：
+// 块大小是编译期常量（graph/kv_pool_cfg.h）：
 // nvcc 的预处理器按本地代码页解码源文件，那个头里的中文字符串会把收尾引号吞掉，
 // 所以 .cu 侧不能 include 它。代价：每 token 一次移位 + 一次掩码，可忽略。
 __global__ void kv_store_paged_kernel(float* __restrict__ pool_k, float* __restrict__ pool_v,
                                       const int32_t* __restrict__ table,
-                                      int layer, int nb, int kb_shift, int64_t pos0, int n,
+                                      int layer, int nb, int64_t pos0, int n,
                                       const float* __restrict__ k, const float* __restrict__ v) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
     const int64_t pos  = pos0 + t;
-    const int64_t kb   = (int64_t)1 << kb_shift;
+    const int64_t kb   = (int64_t)kKvBlock;
     const int     mask = (int)(kb - 1);
-    const int     phys = __ldg(table + (pos >> kb_shift));
+    const int     phys = __ldg(table + (pos >> kKvBlockShift));
     const int     slot = (int)pos & mask;
     const int64_t off  = (((int64_t)layer * nb + phys) * kb + slot) * (int64_t)Model::NKV * Model::HD
                        + (int64_t)h * Model::HD + d;
@@ -90,9 +91,9 @@ void launch_kv_store(float* kc, float* vc, const float* k, const float* v, int n
 }
 
 void launch_kv_store_paged(float* pool_k, float* pool_v, const int32_t* table, int layer, int nb,
-                           int kb_shift, int n, int64_t pos0, const float* k, const float* v, cudaStream_t s) {
+                           int n, int64_t pos0, const float* k, const float* v, cudaStream_t s) {
     dim3 grid(n, Model::NKV);
-    kv_store_paged_kernel<<<grid, Model::HD, 0, s>>>(pool_k, pool_v, table, layer, nb, kb_shift,
+    kv_store_paged_kernel<<<grid, Model::HD, 0, s>>>(pool_k, pool_v, table, layer, nb,
                                                       pos0, n, k, v);
 }
 

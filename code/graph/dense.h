@@ -71,7 +71,7 @@ struct RopeKvOp {
     static void run(LayerCtx& c) {
         c.prof.begin(PH_ROPE);
         Kernel::rope_batch(c.w.qb, c.w.kb, c.n, c.pos0, c.rcs, c.rsn, c.w.s);
-        Kernel::kv_store_paged(c.pool_k, c.pool_v, c.table, c.layer, c.nb, kKvBlockShift,
+        Kernel::kv_store_paged(c.pool_k, c.pool_v, c.table, c.layer, c.nb,
                                c.n, c.pos0, c.w.kb, c.w.vb, c.w.s);
         c.prof.end();
     }
@@ -82,9 +82,9 @@ struct AttnOp {
     static void run(LayerCtx& c) {
         c.prof.begin(PH_ATTN);
         if (c.n == 1) Kernel::attn_decode_paged(c.w.qb, c.pool_k, c.pool_v, c.table, c.layer, c.nb,
-                                                kKvBlockShift, (int)c.pos0 + 1, c.w.ab, c.w.attn_scratch, c.w.s);
+                                                (int)c.pos0 + 1, c.w.ab, c.w.attn_scratch, c.w.s);
         else          Kernel::attn_prefill_paged(c.w.qb, c.pool_k, c.pool_v, c.table, c.layer, c.nb,
-                                                 kKvBlockShift, c.n, (int)c.pos0, c.w.ab, c.w.s);
+                                                 c.n, (int)c.pos0, c.w.ab, c.w.s);
         c.prof.end();
     }
 };
