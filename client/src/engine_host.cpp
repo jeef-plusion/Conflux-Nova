@@ -3,6 +3,7 @@
 #include "session.h"
 #include "INPUT_CHAT.h"
 #include "graph/kv_registry.h"
+#include "nova/model/select.h"
 
 #include <thread>
 #include <mutex>
@@ -37,10 +38,19 @@ bool EngineHost::load(const std::string& gguf, std::string& err) {
         nova::sessions().init(e);
         g_eng = e;
 
-        const nova::ModelCard* card = nova::kCards;
+        // 按编译期模具名选卡（一个二进制 = 一个模型），再用别名兜底
+        const nova::ModelCard* card = nullptr;
+        for (int i = 0; i < nova::kCardCount && !card; ++i)
+            if (std::strcmp(nova::kCards[i].name, kModelName) == 0) card = &nova::kCards[i];
+        if (!card && kModelAliases[0])
+            for (int i = 0; i < nova::kCardCount && !card; ++i)
+                if (std::strcmp(nova::kCards[i].name, kModelAliases[0]) == 0) card = &nova::kCards[i];
+        if (!card) card = nova::kCards;
+
+        std::printf("[client] card = %s\n", card->name);
         g_cur = nova::sessions().create(card, &g_tk, 256);
         tree_.clear();
-        tree_.push_back({ 0, "会话 1" });
+        tree_.push_back({ -1, std::string("当前会话 · ") + card->name });
         return true;
     } catch (const std::exception& ex) {
         err = ex.what();
@@ -51,7 +61,7 @@ bool EngineHost::load(const std::string& gguf, std::string& err) {
 void EngineHost::chat(const std::string& text) {
     if (!g_cur || g_busy.exchange(true)) return;
 
-    g_worker = std::jthread([text] {
+    g_worker = std::jthread([this, text] {
         nova::Session* s = g_cur;
         auto& e = *g_eng;
 
@@ -90,6 +100,8 @@ void EngineHost::chat(const std::string& text) {
         // 5) 吞吐滑动平均
         const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_t0).count();
         if (dt > 0) g_tps = 0.7 * g_tps + 0.3 * (g_tok_cnt / dt);
+        const int64_t tail_block = (s->n_past - 1) / nova::kKvBlock;
+        tree_.push_back({ tail_block, "轮次 @" + std::to_string(tail_block) });
         g_busy = false;
     });
 }
@@ -109,8 +121,10 @@ bool EngineHost::busy() const { return g_busy.load(); }
 int64_t EngineHost::fork(int64_t block) {
     if (!g_cur) return -1;
     nova::Session* ns = nova::sessions().create(g_cur->card, &g_tk, g_cur->max_new);
-    const int64_t tokens = (block + 1) * nova::kKvBlock;
-    if (tokens > g_cur->n_past) return -1;
+    // Fork 到「该块末尾」与「当前已生成」的较小者：块可能只有半满
+    int64_t tokens = (block + 1) * (int64_t)nova::kKvBlock;
+    if (tokens > g_cur->n_past) tokens = g_cur->n_past;
+    if (tokens <= 0) return -1;
     nova::session_attach_prefix(ns, g_cur, tokens);   // ← refcnt++ 在这里发生
     tree_.push_back({ block, "Fork @" + std::to_string(block) });
     return block;

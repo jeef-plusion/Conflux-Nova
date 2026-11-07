@@ -43,3 +43,9 @@ target_link_libraries(ConfluxNova PRIVATE nova_engine d3d11 dxgi dwmapi)
 target_link_options(ConfluxNova PRIVATE /SUBSYSTEM:WINDOWS)
 # 单文件产物：静态 CRT + 静态 CUDA 运行时
 set_property(TARGET ConfluxNova PROPERTY CUDA_RUNTIME_LIBRARY Static)
+# 无 GUI 验证程序（同样链接引擎）
+add_executable(ConfluxHeadless src/headless_main.cpp src/engine_host.cpp)
+target_include_directories(ConfluxHeadless PRIVATE src)
+target_compile_options(ConfluxHeadless PRIVATE /utf-8)
+target_link_libraries(ConfluxHeadless PRIVATE nova_engine d3d11 dxgi dwmapi)
+set_property(TARGET ConfluxHeadless PROPERTY CUDA_RUNTIME_LIBRARY Static)
