@@ -71,9 +71,9 @@ static void ws_push(const std::string& json) {
     if (g_client != INVALID_SOCKET) { auto f = frame(json); ::send(g_client, f.data(), (int)f.size(), 0); }
 }
 
-static std::string telemetry_json() {
+static std::string telemetry_json(const std::string& sid = "") {
     std::lock_guard<std::mutex> lk(g_loadMu);
-    auto t = g_engine.telemetry();
+    auto t = g_engine.telemetry(sid);
     char b[512];
     std::snprintf(b, sizeof(b),
         "{\"ev\":\"tele\",\"tok_s\":%.2f,\"n_past\":%lld,\"vram_used\":%.2f,\"vram_cap\":%.2f,"
@@ -81,6 +81,34 @@ static std::string telemetry_json() {
         t.tok_s, (long long)t.n_past, t.vram_used_gb, t.vram_cap_gb,
         t.blocks_total, t.blocks_free, t.blocks_shared, t.cow_count, t.k_temp, t.top_k);
     return b;
+}
+
+static std::string sessions_json() {
+    std::string j = "{\"sessions\":[";
+    bool first = true;
+    for (auto& x : g_engine.sessions()) {
+        if (!first) j += ","; first = false;
+        j += "{\"id\":\"" + json_escape(x.id) + "\",\"title\":\"" + json_escape(x.title) +
+             "\",\"n_past\":" + std::to_string(x.n_past) + ",\"turns\":" + std::to_string(x.turns) + "}";
+    }
+    return j + "]}";
+}
+static std::string history_json(const std::string& sid) {
+    std::string j = "{\"messages\":[";
+    bool first = true;
+    for (auto& m : g_engine.history(sid)) {
+        if (!first) j += ","; first = false;
+        j += std::string("{\"role\":\"") + (m.user ? "user" : "assistant") +
+             "\",\"text\":\"" + json_escape(m.text) + "\"}";
+    }
+    return j + "]}";
+}
+static std::string qparam(const std::string& path, const char* k) {
+    const std::string key = std::string(k) + "=";
+    size_t p = path.find(key);
+    if (p == std::string::npos) return {};
+    size_t a = p + key.size(), b = path.find_first_of("&", a);
+    return path.substr(a, b == std::string::npos ? std::string::npos : b - a);
 }
 
 static std::string read_file(const std::string& path) {
@@ -152,12 +180,14 @@ static void ws_loop(SOCKET c, const std::string& head) {
         for (int i = 0; i < len && off + i < n; ++i) msg[i] = (char)(buf[off + i] ^ mask[i & 3]);
         if (msg.find("chat") != std::string::npos) {
             std::string text = field(msg, "text");
-            ws_push("{\"ev\":\"start\"}");
-            g_engine.chat(text);
+            std::string sid = field(msg, "session_id");
+            if (sid.empty()) sid = g_engine.new_session();
+            ws_push("{\"ev\":\"start\",\"session_id\":\"" + json_escape(sid) + "\"}");
+            g_engine.chat(sid, text);
         } else if (msg.find("fork") != std::string::npos) {
-            const auto& tr = g_engine.tree();
-            if (!tr.empty()) g_engine.fork(tr.back().block);
-            ws_push(telemetry_json());
+            const std::string sid = field(msg, "session_id");
+            const int64_t fn = g_engine.fork(sid);
+            LOG_K("fork %s -> %lld tokens", sid.c_str(), (long long)fn);
         }
     }
     { std::lock_guard<std::mutex> lk(g_cliMu); if (g_client == c) g_client = INVALID_SOCKET; }
@@ -201,7 +231,23 @@ static void serve(SOCKET c) {
     const std::string path = head.substr(sp1 + 1, sp2 - sp1 - 1);
     const bool post = head.rfind("POST", 0) == 0;
 
-    if (path == "/api/telemetry") { http_reply(c, 200, "application/json", telemetry_json()); closesocket(c); return; }
+    if (path.rfind("/api/telemetry", 0) == 0) {
+        http_reply(c, 200, "application/json", telemetry_json(qparam(path, "session_id")));
+        closesocket(c); return;
+    }
+    if (path.rfind("/api/sessions", 0) == 0) {
+        http_reply(c, 200, "application/json", sessions_json());
+        closesocket(c); return;
+    }
+    if (path.rfind("/api/history", 0) == 0) {
+        http_reply(c, 200, "application/json", history_json(qparam(path, "session_id")));
+        closesocket(c); return;
+    }
+    if (path.rfind("/api/new", 0) == 0) {
+        const std::string id = g_engine.new_session();
+        http_reply(c, 200, "application/json", "{\"id\":\"" + json_escape(id) + "\"}");
+        closesocket(c); return;
+    }
 
     if (post && path == "/api/load") {
         size_t b = head.find("\r\n\r\n");
@@ -226,7 +272,7 @@ static void serve(SOCKET c) {
             const double s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
             tui_bar("LOADING", 100, ok ? "完成" : "失败");
             std::printf("\n");
-            if (ok) LOG_G("模型就绪，用时 %.1f s", s_);
+            if (ok) { LOG_G("模型就绪，用时 %.1f s", s_); const std::string nid = g_engine.new_session(); LOG_K("新会话 %s", nid.c_str()); }
         }
         std::string j = "{\"ok\":" + std::string(ok ? "true" : "false") + ",\"err\":\"" + json_escape(err) + "\"}";
         http_reply(c, 200, "application/json", j); closesocket(c); return;
@@ -236,8 +282,10 @@ static void serve(SOCKET c) {
         size_t b = head.find("\r\n\r\n");
         std::string body = b == std::string::npos ? "" : head.substr(b + 4);
         const std::string text = field(body, "text");
-        ws_push("{\"ev\":\"start\"}");
-        g_engine.chat(text);
+        std::string sid = field(body, "session_id");
+        if (sid.empty()) sid = g_engine.new_session();
+        ws_push("{\"ev\":\"start\",\"session_id\":\"" + json_escape(sid) + "\"}");
+        g_engine.chat(sid, text);
         http_reply(c, 200, "application/json", "{\"ok\":true}"); closesocket(c); return;
     }
 
@@ -269,7 +317,7 @@ int main() {
     std::thread([] {
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            auto t = g_engine.telemetry();
+            auto t = g_engine.telemetry("");
             std::printf("\r\033[2K");
             std::printf("\033[35m│\033[0m 显存池 \033[1m%.2f/%.2f\033[0m GB", t.vram_used_gb, t.vram_cap_gb);
             std::printf(" \033[35m│\033[0m 块 \033[1m%d/%d\033[0m", t.blocks_total - t.blocks_free, t.blocks_total);

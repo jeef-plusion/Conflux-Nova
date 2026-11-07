@@ -1,7 +1,7 @@
 const $ = s => document.querySelector(s);
 const md = t => window.marked ? marked.parse(t) : t.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 
-let ws = null, stream = null, buf = '', hist = new Array(96).fill(0), busy = false;
+let ws = null, stream = null, buf = '', hist = new Array(96).fill(0), busy = false, sid = '', sessions = [];
 
 /* ---------- 连接 ---------- */
 function connect() {
@@ -18,6 +18,7 @@ function on(m) {
     if (stream) { stream.innerHTML = md(buf).replace(/<\/p>$/, '') + '<span class="cursor"></span>'; tweak(); }
     scroll();
   } else if (m.ev === 'start') {
+    if (m.session_id) sid = m.session_id;
     buf = '';
   } else if (m.ev === 'tele') {
     tele(m);
@@ -62,7 +63,7 @@ function submit() {
   buf = '';
   stream = turn('bot', '');
   stream.innerHTML = '<span class="cursor"></span>';
-  send({ cmd: 'chat', text: t });
+  if (!sid) { initSessions(); } send({ cmd: 'chat', text: t, session_id: sid });
   waitIdle();
 }
 function waitIdle() {
@@ -111,7 +112,9 @@ function tele(m) {
 
 function spark() {
   const c = $('#spark'), g = c.getContext('2d');
-  const W = c.width = c.clientWidth * devicePixelRatio, H = c.height = 64 * devicePixelRatio;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const W = Math.max(1, Math.round(c.clientWidth * dpr)), H = Math.round(64 * dpr);
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
   g.clearRect(0, 0, W, H);
   const max = Math.max(10, ...hist), n = hist.length;
   const pts = hist.map((v, i) => [i * W / (n - 1), H - (v / max) * (H - 8) - 4]);
@@ -125,10 +128,48 @@ function spark() {
 
 /* 轮询兜底（WS 没连上也能看到数字） */
 setInterval(async () => {
-  try { const r = await fetch('/api/telemetry'); tele(await r.json()); } catch (e) {}
+  try { const r = await fetch('/api/telemetry?session_id=' + encodeURIComponent(sid)); tele(await r.json()); } catch (e) {}
 }, 700);
 
 $('#new').onclick = () => { $('#chat').innerHTML = ''; location.reload(); };
 $('#toggle').onclick = () => { const t = $('#tele'); t.style.display = t.style.display === 'none' ? 'block' : 'none'; };
 
-connect(); spark();
+async function initSessions() {
+  const r = await fetch('/api/sessions'); const j = await r.json();
+  sessions = j.sessions || [];
+  if (sessions.length) { sid = sessions[sessions.length - 1].id; await loadHistory(sid); }
+  renderTree();
+}
+async function loadHistory(id) {
+  const r = await fetch('/api/history?session_id=' + encodeURIComponent(id));
+  const j = await r.json();
+  $('#chat').innerHTML = ''; $('#hero') && ($('#hero').style.display = 'none');
+  (j.messages || []).forEach(m => turn(m.role === 'user' ? 'user' : 'bot', m.text));
+  sid = id;
+  renderTree();
+}
+function renderTree() {
+  const t = $('#tree'); t.innerHTML = '';
+  sessions.slice().reverse().forEach(s => {
+    const d = document.createElement('div');
+    d.className = 'node' + (s.id === sid ? ' on' : '');
+    d.textContent = (s.title || s.id).slice(0, 18);
+    const f = document.createElement('button'); f.className = 'fork'; f.textContent = 'Fork';
+    f.onclick = e => { e.stopPropagation(); send({ cmd: 'fork', session_id: s.id }); };
+    d.appendChild(f);
+    d.onclick = () => loadHistory(s.id);
+    t.appendChild(d);
+  });
+}
+
+$('#new').onclick = async () => {
+  const r = await fetch('/api/new', { method: 'POST' }); const j = await r.json();
+  sid = j.id; $('#chat').innerHTML = ''; location.reload();
+};
+
+document.querySelectorAll('.chip').forEach(c => c.onclick = () => {
+  if (!sid) initSessions();
+  $('#input').value = c.textContent; autosize(); $('#input').focus();
+});
+
+connect(); spark(); initSessions();

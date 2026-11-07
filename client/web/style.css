@@ -14,7 +14,7 @@ svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke
 .shell{display:grid;grid-template-columns:264px minmax(0,1fr) 296px;height:100vh}
 .side{border-right:1px solid var(--line);display:flex;flex-direction:column;background:var(--bg2)}
 .main{display:flex;flex-direction:column;min-width:0;background:var(--bg)}
-.tele{border-left:1px solid var(--line);background:var(--bg2);padding:16px;overflow:auto}
+.tele{border-left:1px solid var(--line);background:var(--bg2);padding:16px;overflow-y:auto;overflow-x:hidden;min-width:0}
 
 /* ---------- 左栏 ---------- */
 .brand{display:flex;gap:10px;align-items:center;padding:18px 16px 14px}
@@ -128,7 +128,7 @@ textarea::placeholder{color:#5a5a63}
 .big{display:flex;align-items:baseline;gap:6px}
 .big b{font-size:31px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .big span{font-size:11px;color:var(--dim2)}
-#spark{width:100%;height:64px;margin:6px 0 16px}
+#spark{display:block;width:100%;height:64px;margin:6px 0 16px}
 .group{padding:12px 0;border-top:1px solid var(--line)}
 .row{display:flex;align-items:baseline;gap:8px;padding:4px 0;font-size:13px}
 .row span{color:var(--dim);flex:1;font-size:12px}
