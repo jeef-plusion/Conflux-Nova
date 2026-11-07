@@ -182,6 +182,7 @@ static void ws_loop(SOCKET c, const std::string& head) {
             std::string text = field(msg, "text");
             std::string sid = field(msg, "session_id");
             if (sid.empty()) sid = g_engine.new_session();
+            LOG_K("ws chat sid=%s textlen=%zu", sid.c_str(), text.size());
             ws_push("{\"ev\":\"start\",\"session_id\":\"" + json_escape(sid) + "\"}");
             g_engine.chat(sid, text);
         } else if (msg.find("fork") != std::string::npos) {
@@ -284,6 +285,7 @@ static void serve(SOCKET c) {
         const std::string text = field(body, "text");
         std::string sid = field(body, "session_id");
         if (sid.empty()) sid = g_engine.new_session();
+        LOG_K("chat sid=%s textlen=%zu", sid.c_str(), text.size());
         ws_push("{\"ev\":\"start\",\"session_id\":\"" + json_escape(sid) + "\"}");
         g_engine.chat(sid, text);
         http_reply(c, 200, "application/json", "{\"ok\":true}"); closesocket(c); return;
