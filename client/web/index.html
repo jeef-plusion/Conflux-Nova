@@ -1,47 +1,87 @@
 <!doctype html><html lang="zh-CN"><head>
-<meta charset="utf-8"><title>Conflux Nova</title>
+<meta charset="utf-8"><meta name="color-scheme" content="dark">
+<title>Conflux Nova</title>
 <link rel="stylesheet" href="style.css">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/atom-one-dark.min.css">
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/github-dark-dimmed.min.css">
 </head><body>
-<div class="app">
+<div class="shell">
 
-  <aside class="left">
-    <div class="brand"><span class="logo"></span><div><b>CONFLUX NOVA</b><em>FJEC_V2.2.0-Core</em></div></div>
-    <div class="loader">
-      <input id="gguf" placeholder="选择 .gguf 模型…">
-      <button id="browse" class="ghost">浏览</button>
-      <button id="ignite" class="primary">点火</button>
+  <aside class="side">
+    <div class="brand">
+      <div class="mark"><svg viewBox="0 0 24 24"><path d="M12 2l9 5.2v9.6L12 22l-9-5.2V7.2z"/></svg></div>
+      <div class="who"><b>Conflux Nova</b><span>FJEC_V2.2.0-Core</span></div>
     </div>
-    <div class="treeHead"><span>会话</span><button id="new" class="ghost">+ New</button></div>
-    <div id="tree" class="tree"></div>
-    <div class="foot"><div>GTX 1080 Ti · 11 GB</div><div class="dim" id="stat">未加载</div></div>
+
+    <div class="modelcard">
+      <label>模型</label>
+      <div class="inputrow">
+        <input id="gguf" value="build/q4k.gguf" spellcheck="false">
+        <button id="ignite" class="btn-fire" title="加载模型">
+          <svg viewBox="0 0 24 24"><path d="M12 3v10m0 0l4-4m-4 4l-4-4M5 19h14"/></svg>
+        </button>
+      </div>
+      <div class="state"><i id="dot"></i><span id="stat">未加载</span></div>
+    </div>
+
+    <div class="sect"><span>会话</span><button id="new" class="mini">新建</button></div>
+    <nav id="tree" class="tree"></nav>
+
+    <div class="foot">
+      <div class="gpu"><i></i>GTX 1080 Ti · 11 GB</div>
+      <div class="ep">localhost:8080</div>
+    </div>
   </aside>
 
-  <main class="center">
-    <header class="titlebar"><span id="sessName">新会话</span><span class="sp"></span>
-      <button id="toggle" class="ghost">Telemetry</button></header>
-    <div id="chat" class="chat"></div>
-    <div class="composer"><div class="box">
-      <textarea id="input" rows="1" placeholder="回车发送 · Shift+Enter 换行"></textarea>
-      <button id="send" class="primary">发送</button></div></div>
+  <main class="main">
+    <header class="top">
+      <div class="title"><b id="sessName">新会话</b><span id="meta">—</span></div>
+      <button id="toggle" class="mini">监控</button>
+    </header>
+
+    <div id="chat" class="chat">
+      <div class="hero" id="hero">
+        <div class="heroMark"><svg viewBox="0 0 24 24"><path d="M12 2l9 5.2v9.6L12 22l-9-5.2V7.2z"/></svg></div>
+        <h1>开始一段对话</h1>
+        <p>Paged KV · 共享块池 · 写时复制</p>
+        <div class="chips">
+          <button class="chip">用一句话解释导数</button>
+          <button class="chip">写一个快速排序</button>
+          <button class="chip">解释什么是熵</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="box">
+        <textarea id="input" rows="1" placeholder="给 Conflux Nova 发送消息…"></textarea>
+        <button id="send" class="btn-send" title="发送">
+          <svg viewBox="0 0 24 24"><path d="M4 12h15m0 0l-6-6m6 6l-6 6"/></svg>
+        </button>
+      </div>
+      <div class="hint">Enter 发送 · Shift+Enter 换行</div>
+    </div>
   </main>
 
-  <aside class="right" id="right">
-    <div class="tTitle">ENGINE TELEMETRY</div>
-    <div id="chart" class="chart"></div>
-    <div class="row"><span>吞吐</span><b id="tps">0.0</b><i>tok/s</i></div>
-    <div class="row"><span>显存池</span><b id="vram">0.00 / 0.00</b><i>GB</i></div>
-    <div class="bar"><div id="vbar"></div></div>
-    <div class="row"><span>物理块</span><b id="blocks">0 / 0</b></div>
-    <div class="row"><span>共享块</span><b id="shared" class="accent">0</b></div>
-    <div class="row"><span>COW</span><b id="cow" class="hot">0</b></div>
-    <div class="sep"></div>
-    <div class="row sm"><span>kTemp</span><b id="temp">0.80</b></div>
-    <div class="row sm"><span>Top-K</span><b id="topk">40</b></div>
-    <div class="row sm"><span>n_past</span><b id="npast">0</b></div>
+  <aside class="tele" id="tele">
+    <div class="thead">ENGINE TELEMETRY</div>
+    <div class="big"><b id="tps">0.0</b><span>tok/s</span></div>
+    <canvas id="spark" height="64"></canvas>
+
+    <div class="group">
+      <div class="row"><span>显存池</span><b id="vram">0.00 / 0.00</b><i>GB</i></div>
+      <div class="track"><div id="vbar"></div></div>
+      <div class="row"><span>物理块</span><b id="blocks">0 / 0</b></div>
+      <div class="row"><span>共享块</span><b id="shared" class="acc">0</b></div>
+      <div class="row"><span>COW</span><b id="cow" class="warm">0</b></div>
+    </div>
+
+    <div class="group dim">
+      <div class="row"><span>kTemp</span><b id="temp">0.80</b></div>
+      <div class="row"><span>Top-K</span><b id="topk">40</b></div>
+      <div class="row"><span>n_past</span><b id="npast">0</b></div>
+    </div>
   </aside>
 </div>
 <script src="app.js"></script></body></html>
