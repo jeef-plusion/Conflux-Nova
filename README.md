@@ -162,7 +162,51 @@ Kv_block = { AFFAA1891C2A31DA . 618649689ACDE618 }
 
 `hal.h` 是 2.2.0 的核心交付，只有六七个函数：`dev_alloc` / `dev_free` / `dev_upload` / `dev_download` / `dev_sync` / `dev_max_alloc`。
 
-## 1.5 目录结构
+## 1.5 设备贡献的下限（软约束）
+
+我们对「一个设备后端能否被接受」定了一条软约束：
+
+> **必须包含基本的优化单元——至少要有矩阵乘和 softmax。**
+> 缺件的话，模型适配层会非常难受。
+
+### 为什么是软约束
+
+我们不规定性能，只规定**存在性**。一个后端可以先很慢（比如 softmax 用标量循环写），但不能缺件。
+
+因为计算图（模型适配层）是按算子拼出来的：
+
+```
+AttnNorm → QkvProj → [QkvBias] → RopeKv → Attn → OProj → Resid
+         → FfnNorm → GateUp → SwiGlu → Down → Resid
+```
+
+少任何一个单元，`code/graph/` 就得为这个后端开特例——那正是我们要消灭的东西。**缺一件，这条线就破了。**
+
+### 最低集合
+
+| # | 单元 | 为什么不能省 | 我们这边的对应 |
+|---|---|---|---|
+| 1 | **矩阵乘**（GEMV / 批量） | 全部权重都在这里，占单步时间约 70% | `gemv` / `gemv4` / `mmq` |
+| 2 | **softmax** | attention 的必要组成，缺了就只能退化成点积 | `attn_decode` / `attn_prefill` 内部 |
+| 3 | 归一化（RMSNorm） | 每层两次，缺了数值直接崩 | `rms_norm` |
+| 4 | RoPE | 位置信息，缺了长上下文失效 | `rope_batch` / `rope_table` |
+| 5 | 量化 / 反量化 | 权重是 Q4_K，没有解包就走不动 | `quant` + Q4_K 解包 |
+| 6 | elementwise | residual / swiglu / bias | `residual` / `swiglu_ffn` / `bias` |
+| 7 | embed / 采样 | 进出的两端 | `embed` / `sample` |
+
+第 1 和第 2 条是**最低中的最低**：没有矩阵乘，模型跑不了；没有 softmax，attention 不成立。
+
+### 提交设备后端时附带什么
+
+一份 `BACKEND.md`，写清三件事：
+
+1. 上表七类各自实现了没有、用的是硬件指令还是软件模拟；
+2. 设备的硬边界（显存、单次分配上限、共享内存、带宽）；
+3. 一个最小可跑的验证程序（能算出 rel_l2 的那种）。
+
+这三样齐了，模型适配层就能直接挂上去；缺一样，我们就得为它写特例，那就不收了。
+
+## 1.6 目录结构
 
 ```
 code/
