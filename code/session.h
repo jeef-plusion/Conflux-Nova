@@ -34,6 +34,9 @@ struct Session {
     int64_t          pos0 = 0;
     std::vector<int> prompt_ids;
     std::vector<int> out_ids;
+    unsigned long long in_hash  = 0;   // 本轮的块前缀
+    unsigned long long out_hash = 0;   // 本轮的块后缀
+
     std::string      pending;
     std::string      reply;
     double           prefill_ms = 0;

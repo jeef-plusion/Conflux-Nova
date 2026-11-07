@@ -1,6 +1,7 @@
 // 阶段 2/6：文本 → token（词表在前端）；越界则丢最老的一半并重算 → 调用 INPUT_START
 #pragma once
 #include "session.h"
+#include "graph/kv_block.h"
 #include "INPUT_START.h"
 
 namespace nova {
@@ -65,6 +66,7 @@ inline void INPUT_TOKENIZR(Session* s) {
                     s->history.size(), s->prompt_ids.size());
     }
 
+    s->in_hash = nova::kv_hash_ids(s->prompt_ids);   // KV 块前缀
     INPUT_START(s);
 }
 

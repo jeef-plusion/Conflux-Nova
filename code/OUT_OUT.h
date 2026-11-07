@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdio>
 #include "session.h"
+#include "graph/kv_block.h"
 
 namespace nova {
 
