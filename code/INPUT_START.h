@@ -2,6 +2,7 @@
 #pragma once
 #include <chrono>
 #include "session.h"
+#include "graph/kv_registry.h"
 #include "OUT_TKZ.h"
 
 namespace nova {
@@ -31,7 +32,9 @@ inline void INPUT_START(Session* s) {
     s->decode_ms  = std::chrono::duration<double, std::milli>(t2 - t1).count();
     s->n_past     = p;
     s->kv_valid   = true;
+    nova::blocks().put(nova::KvBlock{s->in_hash, s->out_hash, s->id, s->turn_no, s->pos0, s->n_past, true});
     OUT_OUT_DONE(s);
+    ++s->turn_no;
 }
 
 } // namespace nova

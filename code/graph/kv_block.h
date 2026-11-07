@@ -63,6 +63,14 @@ inline uint64_t kv_hash_ids(const std::vector<int>& ids) {
     return keep[0];
 }
 
+// 对一段文本（UTF-8 字节）求块 ID：与 token 序列解耦，换模板不变
+inline uint64_t kv_hash_text(const std::string& text) {
+    std::vector<int> b;
+    b.reserve(text.size());
+    for (unsigned char c : text) b.push_back((int)c);
+    return kv_hash_ids(b);
+}
+
 inline std::string kv_hash_hex(uint64_t v) {
     static const char* HEX = "0123456789ABCDEF";
     std::string s(16, '0');

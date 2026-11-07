@@ -66,7 +66,9 @@ inline void INPUT_TOKENIZR(Session* s) {
                     s->history.size(), s->prompt_ids.size());
     }
 
-    s->in_hash = nova::kv_hash_ids(s->prompt_ids);   // KV 块前缀
+    if (s->turn_no == 0) s->first_hash = nova::kv_hash_ids(s->prompt_ids);  // 块前缀：首轮输入
+    s->in_hash  = s->first_hash;
+    s->out_hash = nova::kv_hash_text(s->user_text) ^ (unsigned long long)(s->turn_no + 1);  // 块后缀：本轮用户文本 + 轮次盐
     INPUT_START(s);
 }
 

@@ -34,6 +34,8 @@ struct Session {
     int64_t          pos0 = 0;
     std::vector<int> prompt_ids;
     std::vector<int> out_ids;
+    unsigned long long first_hash = 0; // 本对话首轮输入的哈希（块前缀）
+    int                turn_no    = 0; // 轮次序号
     unsigned long long in_hash  = 0;   // 本轮的块前缀
     unsigned long long out_hash = 0;   // 本轮的块后缀
 
