@@ -10,7 +10,7 @@ aside,main{background:rgba(12,15,20,.82);backdrop-filter:blur(30px) saturate(150
 .brand b{display:block;font-size:12px;letter-spacing:.14em}
 .brand em{font-style:normal;font-size:10px;color:var(--dim)}
 .logo{width:10px;height:10px;border-radius:3px;background:linear-gradient(135deg,#4da3ff,#8b5cf6);box-shadow:0 0 14px rgba(77,163,255,.7)}
-.loader{display:flex;gap:8px;padding:0 14px 12px}
+.loader{display:flex;gap:6px;padding:0 14px 12px}
 .loader input{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:8px 10px;font-size:12px;outline:none}
 .loader input:focus{border-color:rgba(77,163,255,.6)}
 .primary{background:linear-gradient(180deg,#5fb0ff,#2f7fd6);color:#04121e;border:0;border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer;transition:.18s}

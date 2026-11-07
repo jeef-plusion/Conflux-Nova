@@ -14,7 +14,11 @@ function send(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
 function on(m){
   if(m.ev==='tok'){ last += m.t; if(cur) cur.innerHTML = md(last); scroll(); }
   else if(m.ev==='tele') tele(m);
-  else if(m.ev==='loaded'){ $('#stat').textContent = m.ok ? '已加载' : ('失败: '+m.err); }
+  else if(m.ev==='loaded'){
+    if(m.ok){ $('#stat').textContent = '已加载 · '+(m.path||'').split(/[\\/]/).pop(); $('#stat').style.color='#3ddc84'; }
+    else { $('#stat').textContent = '失败: ' + (m.err||'未知'); $('#stat').style.color='#ff6b5e'; }
+  }
+  else if(m.ev==='picked'){ if(m.path){ $('#gguf').value = m.path; $('#stat').textContent = '已选择模型'; } }
   else if(m.ev==='start'){ last=''; }
 }
 
@@ -33,7 +37,13 @@ $('#send').onclick = () => {
   send({cmd:'chat', text:t});
 };
 $('#input').addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('#send').click();} });
-$('#ignite').onclick = ()=> send({cmd:'load', path:$('#gguf').value});
+$('#browse').onclick = ()=> send({cmd:'pick'});
+$('#ignite').onclick = ()=>{
+  const p = $('#gguf').value.trim();
+  if(!p){ $('#stat').textContent='先选模型'; send({cmd:'pick'}); return; }
+  $('#stat').textContent = '加载中…';
+  send({cmd:'load', path:p});
+};
 $('#new').onclick = ()=>{ $('#chat').innerHTML=''; last=''; };
 $('#toggle').onclick = ()=>{ const r=$('#right'); r.style.display = r.style.display==='none'?'block':'none'; };
 

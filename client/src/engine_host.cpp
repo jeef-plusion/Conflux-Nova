@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 
 namespace {
 nova::Engine*    g_eng = nullptr;
@@ -31,6 +32,50 @@ std::chrono::steady_clock::time_point g_t0;
 
 bool EngineHost::load(const std::string& gguf, std::string& err) {
     try {
+        FILE* fp = std::fopen(gguf.c_str(), "rb");
+        if (!fp) { err = "文件不存在: " + gguf; return false; }
+        std::fclose(fp);
+
+        // 先做「软校验」：verify_model 不匹配会直接 abort，UI 会连进程一起死。
+        // 这里在调用引擎之前自己比对关键字段，给出可读的错误。
+        {
+            std::fprintf(stderr, "[client] precheck open\n"); std::fflush(stderr);
+            nova::GgufFile g0(gguf);
+            std::fprintf(stderr, "[client] precheck parsed\n"); std::fflush(stderr);
+            const std::string arch = g0.s("general.architecture");
+            auto hasu = [&](const char* k) { return g0.has(arch + k); };
+            const uint64_t bc = hasu(".block_count")        ? g0.u(arch + ".block_count") : 0;
+            const uint64_t el = hasu(".embedding_length")   ? g0.u(arch + ".embedding_length") : 0;
+            const uint64_t nh = hasu(".attention.head_count") ? g0.u(arch + ".attention.head_count") : 0;
+            // rope_theta 在不同 GGUF 里可能是 .rope_theta 或 .rope.freq_base
+            double th = 0;
+            if (g0.has(arch + ".rope_theta"))          th = g0.f(arch + ".rope_theta");
+            else if (g0.has(arch + ".rope.freq_base")) th = g0.f(arch + ".rope.freq_base");
+            char b[256];
+            if (bc && bc != (uint64_t)nova::Model::L) {
+                std::snprintf(b, sizeof(b), "层数不匹配：文件 %llu，本引擎 %d（需重新编译）",
+                              (unsigned long long)bc, (int)nova::Model::L);
+                err = b; return false;
+            }
+            if (el && el != (uint64_t)nova::Model::D) {
+                std::snprintf(b, sizeof(b), "隐藏维不匹配：文件 %llu，本引擎 %d",
+                              (unsigned long long)el, (int)nova::Model::D);
+                err = b; return false;
+            }
+            if (nh && nh != (uint64_t)nova::Model::NH) {
+                std::snprintf(b, sizeof(b), "注意力头数不匹配：文件 %llu，本引擎 %d",
+                              (unsigned long long)nh, (int)nova::Model::NH);
+                err = b; return false;
+            }
+            std::fprintf(stderr, "[client] precheck bc=%llu el=%llu nh=%llu th=%.1f mold_theta=%d\n",
+                         (unsigned long long)bc, (unsigned long long)el, (unsigned long long)nh, th, (int)nova::Model::theta);
+            std::fflush(stderr);
+            if (th > 0 && std::fabs(th - (double)nova::Model::theta) > 1.0) {
+                std::snprintf(b, sizeof(b), "rope_theta 不匹配：文件 %.0f，本引擎 %d —— 这是另一个模型变体",
+                              th, (int)nova::Model::theta);
+                err = b; return false;
+            }
+        }
         auto* e = new nova::Engine();
         e->load(gguf);
         nova::GgufFile meta(gguf);

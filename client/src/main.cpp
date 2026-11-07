@@ -7,11 +7,13 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <cstdarg>
 #include <cstdio>
 #include <wrl.h>
 #include <string>
 #include <thread>
+#include <mutex>
 #include <chrono>
 #include "WebView2.h"
 #include "ws_server.h"
@@ -32,6 +34,7 @@ static ComPtr<ICoreWebView2> g_web;
 static WsServer g_ws;
 static EngineHost g_engine;
 static bool g_loaded = false;
+static std::mutex g_loadMu;
 
 static void apply_mica(HWND h) {
     const int backdrop = 2, corner = 2, dark = 1;
@@ -53,6 +56,7 @@ static std::string json_escape(const std::string& s) {
 }
 
 static std::string telemetry_json() {
+    std::lock_guard<std::mutex> lk(g_loadMu);
     auto t = g_engine.telemetry();
     char b[512];
     std::snprintf(b, sizeof(b),
@@ -63,9 +67,43 @@ static std::string telemetry_json() {
     return b;
 }
 
+static std::string pick_gguf() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::string out;
+    IFileOpenDialog* dlg = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&dlg)))) {
+        COMDLG_FILTERSPEC filter[] = { { L"GGUF 模型", L"*.gguf" }, { L"所有文件", L"*.*" } };
+        dlg->SetFileTypes(2, filter);
+        dlg->SetTitle(L"选择 GGUF 模型");
+        if (SUCCEEDED(dlg->Show(nullptr))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&item))) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                    char buf[MAX_PATH * 4]{};
+                    WideCharToMultiByte(CP_UTF8, 0, path, -1, buf, sizeof(buf), nullptr, nullptr);
+                    out = buf;
+                    CoTaskMemFree(path);
+                }
+                item->Release();
+            }
+        }
+        dlg->Release();
+    }
+    CoUninitialize();
+    return out;
+}
+
 static void on_cmd(const std::string& raw, std::function<void(const std::string&)> reply) {
     LOG("cmd: %.120s", raw.c_str());
     auto has = [&](const char* k) { return raw.find(std::string("\"") + k + "\"") != std::string::npos; };
+    if (has("pick")) {
+        const std::string p = pick_gguf();
+        LOG("picked: %s", p.c_str());
+        reply("{\"ev\":\"picked\",\"path\":\"" + json_escape(p) + "\"}");
+        return;
+    }
     if (has("load")) {
         std::string path = "build/q4k.gguf";
         size_t p = raw.find("\"path\"");
@@ -75,9 +113,11 @@ static void on_cmd(const std::string& raw, std::function<void(const std::string&
             if (a != std::string::npos && b != std::string::npos) path = raw.substr(a + 1, b - a - 1);
         }
         std::string err;
-        g_loaded = g_engine.load(path, err);
+        LOG("load request: %s", path.c_str());
+        { std::lock_guard<std::mutex> lk(g_loadMu); g_loaded = g_engine.load(path, err); }
+        LOG("load result: %d (%s)", (int)g_loaded, err.c_str());
         reply("{\"ev\":\"loaded\",\"ok\":" + std::string(g_loaded ? "true" : "false") +
-              ",\"err\":\"" + json_escape(err) + "\"}");
+              ",\"err\":\"" + json_escape(err) + "\",\"path\":\"" + json_escape(path) + "\"}");
         reply(telemetry_json());
         return;
     }
@@ -202,6 +242,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             g_ws.push(telemetry_json());
         }
     }).detach();
+
+    // 命令行带路径则自动加载（也方便脚本验证）
+    int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argc > 1 && argv[1]) {
+        char p[MAX_PATH * 4]{};
+        WideCharToMultiByte(CP_UTF8, 0, argv[1], -1, p, sizeof(p), nullptr, nullptr);
+        std::thread([path = std::string(p)] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            std::string err; LOG("auto-load: %s", path.c_str());
+            std::lock_guard<std::mutex> lk(g_loadMu);
+            const bool ok = g_engine.load(path, err);
+            LOG("auto-load result: %d (%s)", (int)ok, err.c_str());
+            g_ws.push("{\"ev\":\"loaded\",\"ok\":" + std::string(ok ? "true" : "false") +
+                      ",\"err\":\"" + json_escape(err) + "\",\"path\":\"" + json_escape(path) + "\"}");
+        }).detach();
+    }
+    LocalFree(argv);
 
     MSG m; while (GetMessage(&m, nullptr, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }
     return 0;
