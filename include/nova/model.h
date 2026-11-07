@@ -7,6 +7,7 @@
 #include "nova/kernel.h"
 #include "nova/loader/gguf.h"
 #include "nova/memory/arena.h"
+#include "graph/kv_pool.h"
 #include "graph/kv_pool_cfg.h"   // kKvBlock：块池寻址的唯一真源
 
 namespace nova {
@@ -61,6 +62,9 @@ public:
     void prefill(Workspace& w, const int* ids, int n, const int32_t* table, int64_t pos0);
     int  decode(Workspace& w, int id, const int32_t* table, int64_t pos);
     int  sample_last(Workspace& w);
+
+    // 写入前的 COW 守卫：pos 所在块若被共享，复制一份独占块并更新设备表
+    void cow_guard(KvSlice& sl, int64_t pos, cudaStream_t s);
 
     struct BatchItem { int tok_in; const int32_t* table; int64_t pos; int tok_out; };
     void decode_batch(BatchItem* it, int n, cudaStream_t s);

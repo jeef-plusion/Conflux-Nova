@@ -165,6 +165,28 @@ int Engine::decode(Workspace& w, int id, const int32_t* table, int64_t pos) {
     return sample_last(w);
 }
 
+void Engine::cow_guard(KvSlice& sl, int64_t pos, cudaStream_t s) {
+    const int nb = kv_pool().cow_slice(sl, pos);
+    if (nb == -2) { std::fprintf(stderr, "[FATAL] KV pool full during COW\n"); std::abort(); }
+    if (nb < 0) return;                       // 独占，直接写
+    const int src = sl.need_copy_from;
+    sl.need_copy_from = -1;
+
+    const size_t per = (size_t)kKvBlock * kv_width();   // 每块每层的 float 数（k/v 分池）
+    const int    NB  = kv_nb();
+    for (int l = 0; l < Model::L; ++l) {
+        cudaMemcpyAsync(kv_k_pool_ + ((size_t)l * NB + nb) * per,
+                        kv_k_pool_ + ((size_t)l * NB + src) * per, per * 4,
+                        cudaMemcpyDeviceToDevice, s);
+        cudaMemcpyAsync(kv_v_pool_ + ((size_t)l * NB + nb) * per,
+                        kv_v_pool_ + ((size_t)l * NB + src) * per, per * 4,
+                        cudaMemcpyDeviceToDevice, s);
+    }
+    int32_t v = (int32_t)nb;
+    cudaMemcpyAsync(sl.table_dev + (pos >> kKvBlockShift), &v, sizeof(v),
+                    cudaMemcpyHostToDevice, s);
+}
+
 int Engine::sample_last(Workspace& w) {
     if (h_logits_.empty()) h_logits_.resize((size_t)Model::V);
     NOVA_CU(cudaMemcpyAsync(h_logits_.data(), w.logits, (size_t)Model::V * sizeof(float),

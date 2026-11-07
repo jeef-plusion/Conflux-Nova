@@ -152,4 +152,31 @@ private:
 
 inline SessionManager& sessions() { static SessionManager m; return m; }
 
+// 会话级：挂载另一会话的前 k 个块（共享物理内存，refcnt++）
+inline void session_attach(Session* dst, Session* src, int k) {
+    nova::kv_pool().attach(*dst->kslice, *src->kslice, k);
+    dst->n_past = (int64_t)k * nova::kKvBlock;
+    cudaMemcpyAsync(dst->table_dev, dst->kslice->table.data(),
+                    (size_t)dst->kslice->table.size() * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, dst->ws.s);
+    cudaStreamSynchronize(dst->ws.s);
+}
+
+// 写入前对 [pos0, pos0+n) 覆盖的每个逻辑块做 COW
+inline void session_cow(Session* s, int64_t pos0, int n) {
+    const int b0 = nova::kv_block_index(pos0);
+    const int b1 = nova::kv_block_index(pos0 + n - 1);
+    for (int b = b0; b <= b1; ++b)
+        s->engine->cow_guard(*s->kslice, (int64_t)b * nova::kKvBlock, s->ws.s);
+}
+
+inline void session_attach_prefix(Session* dst, Session* src, int64_t n_tokens) {
+    nova::kv_pool().attach_prefix(*dst->kslice, *src->kslice, n_tokens);
+    dst->n_past = n_tokens;
+    cudaMemcpyAsync(dst->table_dev, dst->kslice->table.data(),
+                    (size_t)dst->kslice->table.size() * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, dst->ws.s);
+    cudaStreamSynchronize(dst->ws.s);
+}
+
 } // namespace nova
