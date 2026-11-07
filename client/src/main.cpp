@@ -7,6 +7,8 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <cstdarg>
+#include <cstdio>
 #include <wrl.h>
 #include <string>
 #include <thread>
@@ -19,6 +21,12 @@
 
 using namespace Microsoft::WRL;
 static const wchar_t* kClass = L"ConfluxNovaWV";
+static FILE* g_log = nullptr;
+static void LOG(const char* fmt, ...) {
+    if (!g_log) { fopen_s(&g_log, "startup.log", "w"); if (!g_log) return; }
+    va_list ap; va_start(ap, fmt); vfprintf(g_log, fmt, ap); va_end(ap);
+    fputc('\n', g_log); fflush(g_log);
+}
 static ComPtr<ICoreWebView2Controller> g_ctrl;
 static ComPtr<ICoreWebView2> g_web;
 static WsServer g_ws;
@@ -56,6 +64,7 @@ static std::string telemetry_json() {
 }
 
 static void on_cmd(const std::string& raw, std::function<void(const std::string&)> reply) {
+    LOG("cmd: %.120s", raw.c_str());
     auto has = [&](const char* k) { return raw.find(std::string("\"") + k + "\"") != std::string::npos; };
     if (has("load")) {
         std::string path = "build/q4k.gguf";
@@ -94,16 +103,16 @@ static void on_cmd(const std::string& raw, std::function<void(const std::string&
 }
 
 static void init_webview(HWND hwnd) {
-    wchar_t dir[MAX_PATH];
-    SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir);
-    std::wstring data = std::wstring(dir) + L"\\ConfluxNova\\WV2";
-
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, data.c_str(), nullptr,
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [hwnd](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
+            [hwnd](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+                LOG("env callback hr=0x%08X env=%p", (unsigned)hr, (void*)env);
+                if (FAILED(hr) || !env) return hr;
                 env->CreateCoreWebView2Controller(hwnd,
                     Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                        [](HRESULT, ICoreWebView2Controller* c) -> HRESULT {
+                        [](HRESULT hr2, ICoreWebView2Controller* c) -> HRESULT {
+                            LOG("ctrl callback hr=0x%08X ctrl=%p", (unsigned)hr2, (void*)c);
+                            if (FAILED(hr2) || !c) return hr2;
                             g_ctrl = c; g_ctrl->get_CoreWebView2(&g_web);
                             // 背景透明（需要 Controller2）
                             ComPtr<ICoreWebView2Controller2> c2;
@@ -117,7 +126,9 @@ static void init_webview(HWND hwnd) {
                                 w3->SetVirtualHostNameToFolderMapping(
                                     L"app.local", L"web", COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
                             }
+                            LOG("mapping done, navigating");
                             g_web->Navigate(L"https://app.local/index.html");
+                            LOG("navigated");
                             return S_OK;
                         }).Get());
                 return S_OK;
@@ -147,9 +158,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
         140, 100, 1320, 840, nullptr, nullptr, inst, nullptr);
     apply_mica(h);
+    LOG("window ok");
 
+    LOG("starting ws");
     g_ws.start(17530, on_cmd);
+    LOG("ws started");
+    LOG("init webview");
     init_webview(h);
+    LOG("webview init requested");
 
     // 每 250ms 推一次遥测
     std::thread([] {

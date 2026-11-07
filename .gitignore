@@ -9,3 +9,4 @@ build/
 
 _*.bat
 clocks.csv
+startup.log
