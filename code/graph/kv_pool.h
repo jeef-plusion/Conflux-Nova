@@ -116,6 +116,7 @@ public:
         dst.n_past = n_tokens;
     }
     int cow_count() const { return cow_count_; }
+    int free_blocks() const { return (int)free_blocks_.size(); }
 
     // COW：pos 所在的逻辑块若被共享，则复制一份独占块，返回新物理块号；无需复制返回 -1
     int cow_slice(KvSlice& s, int64_t pos) {

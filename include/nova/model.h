@@ -83,6 +83,8 @@ public:
     static constexpr int64_t kv_span() { return (int64_t)Model::L * kMaxCtx * Model::NKV * Model::HD; }
 
     size_t weight_bytes() const { return weight_bytes_; }
+    double arena_used_gb() const { return arena_.used() / 1073741824.0; }
+    double arena_cap_gb()  const { return arena_.cap()  / 1073741824.0; }
     size_t workspace_bytes(int n_max) const { return ws_bytes(n_max); }
 
     Profiler prof;
