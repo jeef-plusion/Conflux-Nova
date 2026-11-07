@@ -8,6 +8,7 @@
 #include "map/qwen2.5/model_map.h"
 #include "map/qwen2.5/tokenizer.h"
 #include "kernel/1080ti/kernel_api.h"
+#include "graph/kv_pool.h"
 
 namespace nova {
 
@@ -22,6 +23,7 @@ struct Session {
     float*   kvv      = nullptr;
     bool     kv_valid = false;
     std::vector<Msg> history;
+    KvSlice*         kslice = nullptr;   // 块池里的独占切片
 
     Workspace ws;              // 本会话独占的激活缓冲 + stream
     std::string obuf;          // 本会话输出缓冲（防串台）
@@ -72,7 +74,11 @@ inline std::string render_full(const ModelCard& c, const std::vector<Msg>& h, co
 
 class SessionManager {
 public:
-    void init(Engine* e) { engine_ = e; for (int i = 0; i < kMaxSessions; ++i) used_[i] = false; }
+    void init(Engine* e) {
+        engine_ = e;
+        for (int i = 0; i < kMaxSessions; ++i) used_[i] = false;
+        kv_pool().init(kMaxSessions, kMaxCtx);
+    }
 
     Session* create(const ModelCard* card, Tokenizer* tk, int max_new) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -108,6 +114,7 @@ public:
         for (auto it = live_.begin(); it != live_.end(); ++it) {
             if ((*it)->id == id) {
                 cudaStreamDestroy((*it)->ws.s);
+                kv_pool().release((*it)->kslice);
                 used_[id] = false;
                 live_.erase(it);
                 return;
