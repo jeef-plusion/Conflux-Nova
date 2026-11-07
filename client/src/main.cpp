@@ -1,81 +1,141 @@
-// main.cpp — Win32 + D3D11 + Dear ImGui，单进程直连引擎
+// main.cpp — Win32 + Mica + WebView2；本地 WS 直连引擎
 #define UNICODE
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>      // 必须先于 windows.h，否则拉进 winsock1 冲突
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <dwmapi.h>
-#include <d3d11.h>
-#include <dxgi.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <wrl.h>
+#include <string>
+#include <thread>
+#include <chrono>
+#include "WebView2.h"
+#include "ws_server.h"
+#include "engine_host.h"
 #pragma comment(lib, "dwmapi.lib")
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "ole32.lib")
 
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_dx11.h"
-#include "app.h"
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
-
-static ID3D11Device*           g_dev = nullptr;
-static ID3D11DeviceContext*    g_ctx = nullptr;
-static IDXGISwapChain*         g_swap = nullptr;
-static ID3D11RenderTargetView* g_rtv = nullptr;
-static App                     g_app;
-
-static const wchar_t* kClass = L"ConfluxNovaNative";
+using namespace Microsoft::WRL;
+static const wchar_t* kClass = L"ConfluxNovaWV";
+static ComPtr<ICoreWebView2Controller> g_ctrl;
+static ComPtr<ICoreWebView2> g_web;
+static WsServer g_ws;
+static EngineHost g_engine;
+static bool g_loaded = false;
 
 static void apply_mica(HWND h) {
-    const int backdrop = 2;                 // Mica
+    const int backdrop = 2, corner = 2, dark = 1;
     DwmSetWindowAttribute(h, 38, &backdrop, sizeof(backdrop));
-    const int corner = 2;                   // 圆角
     DwmSetWindowAttribute(h, 33, &corner, sizeof(corner));
-    const int dark = 1;
     DwmSetWindowAttribute(h, 20, &dark, sizeof(dark));
     MARGINS m{ -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(h, &m);
 }
 
-static bool init_d3d(HWND h) {
-    DXGI_SWAP_CHAIN_DESC sd{};
-    sd.BufferCount = 2;
-    sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = h;
-    sd.SampleDesc.Count = 1;
-    sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+static std::string json_escape(const std::string& s) {
+    std::string o; for (char c : s) {
+        if (c == '"' || c == '\\') { o.push_back('\\'); o.push_back(c); }
+        else if (c == '\n') o += "\\n";
+        else if (c == '\r') {}
+        else if ((unsigned char)c < 0x20) o += ' ';
+        else o.push_back(c);
+    } return o;
+}
 
-    if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
-            &sd, &g_swap, &g_dev, nullptr, &g_ctx))) return false;
+static std::string telemetry_json() {
+    auto t = g_engine.telemetry();
+    char b[512];
+    std::snprintf(b, sizeof(b),
+        "{\"ev\":\"tele\",\"tok_s\":%.2f,\"n_past\":%lld,\"vram_used\":%.2f,\"vram_cap\":%.2f,"
+        "\"blocks_total\":%d,\"blocks_free\":%d,\"shared\":%d,\"cow\":%d,\"temp\":%.2f,\"topk\":%d}",
+        t.tok_s, (long long)t.n_past, t.vram_used_gb, t.vram_cap_gb,
+        t.blocks_total, t.blocks_free, t.blocks_shared, t.cow_count, t.k_temp, t.top_k);
+    return b;
+}
 
-    ID3D11Texture2D* back = nullptr;
-    g_swap->GetBuffer(0, IID_PPV_ARGS(&back));
-    g_dev->CreateRenderTargetView(back, nullptr, &g_rtv);
-    back->Release();
-    return true;
+static void on_cmd(const std::string& raw, std::function<void(const std::string&)> reply) {
+    auto has = [&](const char* k) { return raw.find(std::string("\"") + k + "\"") != std::string::npos; };
+    if (has("load")) {
+        std::string path = "build/q4k.gguf";
+        size_t p = raw.find("\"path\"");
+        if (p != std::string::npos) {
+            size_t a = raw.find('"', raw.find(':', p));
+            size_t b = raw.find('"', a + 1);
+            if (a != std::string::npos && b != std::string::npos) path = raw.substr(a + 1, b - a - 1);
+        }
+        std::string err;
+        g_loaded = g_engine.load(path, err);
+        reply("{\"ev\":\"loaded\",\"ok\":" + std::string(g_loaded ? "true" : "false") +
+              ",\"err\":\"" + json_escape(err) + "\"}");
+        reply(telemetry_json());
+        return;
+    }
+    if (has("chat")) {
+        size_t p = raw.find("\"text\"");
+        std::string text = "";
+        if (p != std::string::npos) {
+            size_t a = raw.find('"', raw.find(':', p));
+            size_t b = raw.rfind('"');
+            if (a != std::string::npos && b > a) text = raw.substr(a + 1, b - a - 1);
+        }
+        g_engine.chat(text);
+        reply("{\"ev\":\"start\"}");
+        return;
+    }
+    if (has("fork")) {
+        const auto& tr = g_engine.tree();
+        if (!tr.empty()) g_engine.fork(tr.back().block);
+        reply(telemetry_json());
+        return;
+    }
+    reply("{}");
+}
+
+static void init_webview(HWND hwnd) {
+    wchar_t dir[MAX_PATH];
+    SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir);
+    std::wstring data = std::wstring(dir) + L"\\ConfluxNova\\WV2";
+
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, data.c_str(), nullptr,
+        Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+            [hwnd](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
+                env->CreateCoreWebView2Controller(hwnd,
+                    Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                        [](HRESULT, ICoreWebView2Controller* c) -> HRESULT {
+                            g_ctrl = c; g_ctrl->get_CoreWebView2(&g_web);
+                            // 背景透明（需要 Controller2）
+                            ComPtr<ICoreWebView2Controller2> c2;
+                            if (SUCCEEDED(g_ctrl->QueryInterface(IID_PPV_ARGS(c2.GetAddressOf())))) {
+                                COREWEBVIEW2_COLOR bg{ 0, 0, 0, 0 };
+                                c2->put_DefaultBackgroundColor(bg);
+                            }
+                            // 虚拟站点映射（需要 WebView2_3）
+                            ComPtr<ICoreWebView2_3> w3;
+                            if (SUCCEEDED(g_web->QueryInterface(IID_PPV_ARGS(w3.GetAddressOf())))) {
+                                w3->SetVirtualHostNameToFolderMapping(
+                                    L"app.local", L"web", COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+                            }
+                            g_web->Navigate(L"https://app.local/index.html");
+                            return S_OK;
+                        }).Get());
+                return S_OK;
+            }).Get());
 }
 
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    if (ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp)) return true;
     switch (msg) {
     case WM_NCCALCSIZE: if (wp) return 0; break;
+    case WM_SIZE: if (g_ctrl) { RECT rc; GetClientRect(h, &rc); g_ctrl->put_Bounds(rc); } break;
     case WM_DESTROY: PostQuitMessage(0); return 0;
-    case WM_SIZE:
-        if (g_dev && wp != SIZE_MINIMIZED) {
-            if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; }
-            g_swap->ResizeBuffers(0, LOWORD(lp), HIWORD(lp), DXGI_FORMAT_UNKNOWN, 0);
-            ID3D11Texture2D* back = nullptr;
-            g_swap->GetBuffer(0, IID_PPV_ARGS(&back));
-            g_dev->CreateRenderTargetView(back, nullptr, &g_rtv);
-            back->Release();
-        }
-        break;
     }
     return DefWindowProc(h, msg, wp, lp);
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.lpfnWndProc = wndproc; wc.hInstance = inst;
@@ -87,32 +147,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
         140, 100, 1320, 840, nullptr, nullptr, inst, nullptr);
     apply_mica(h);
-    if (!init_d3d(h)) return 1;
 
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGui::StyleColorsDark();
-    ImGui::GetStyle().WindowRounding = 10.f;
-    ImGui::GetStyle().FrameRounding = 8.f;
-    ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0.043f, 0.059f, 0.078f, 0.86f);
-    ImGui_ImplWin32_Init(h);
-    ImGui_ImplDX11_Init(g_dev, g_ctx);
+    g_ws.start(17530, on_cmd);
+    init_webview(h);
 
-    MSG msg{};
-    for (;;) {
-        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg); DispatchMessage(&msg);
-            if (msg.message == WM_QUIT) return 0;
+    // 每 250ms 推一次遥测
+    std::thread([] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            g_engine.pump([](const std::string& tok) {
+                g_ws.push("{\"ev\":\"tok\",\"t\":\"" + json_escape(tok) + "\"}");
+            });
+            g_ws.push(telemetry_json());
         }
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        g_app.frame();                       // ← UI 直接读引擎内存
-        ImGui::Render();
-        const float clear[4] = { 0.043f, 0.059f, 0.078f, 0.86f };
-        g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
-        g_ctx->ClearRenderTargetView(g_rtv, clear);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        g_swap->Present(1, 0);
-    }
+    }).detach();
+
+    MSG m; while (GetMessage(&m, nullptr, 0, 0)) { TranslateMessage(&m); DispatchMessage(&m); }
+    return 0;
 }

@@ -1,0 +1,46 @@
+<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><title>Conflux Nova</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/highlight.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11/styles/atom-one-dark.min.css">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head><body>
+<div class="app">
+
+  <aside class="left">
+    <div class="brand"><span class="logo"></span><div><b>CONFLUX NOVA</b><em>FJEC_V2.2.0-Core</em></div></div>
+    <div class="loader">
+      <input id="gguf" value="build/q4k.gguf">
+      <button id="ignite" class="primary">点火</button>
+    </div>
+    <div class="treeHead"><span>会话</span><button id="new" class="ghost">+ New</button></div>
+    <div id="tree" class="tree"></div>
+    <div class="foot"><div>GTX 1080 Ti · 11 GB</div><div class="dim" id="stat">未加载</div></div>
+  </aside>
+
+  <main class="center">
+    <header class="titlebar"><span id="sessName">新会话</span><span class="sp"></span>
+      <button id="toggle" class="ghost">Telemetry</button></header>
+    <div id="chat" class="chat"></div>
+    <div class="composer"><div class="box">
+      <textarea id="input" rows="1" placeholder="回车发送 · Shift+Enter 换行"></textarea>
+      <button id="send" class="primary">发送</button></div></div>
+  </main>
+
+  <aside class="right" id="right">
+    <div class="tTitle">ENGINE TELEMETRY</div>
+    <div id="chart" class="chart"></div>
+    <div class="row"><span>吞吐</span><b id="tps">0.0</b><i>tok/s</i></div>
+    <div class="row"><span>显存池</span><b id="vram">0.00 / 0.00</b><i>GB</i></div>
+    <div class="bar"><div id="vbar"></div></div>
+    <div class="row"><span>物理块</span><b id="blocks">0 / 0</b></div>
+    <div class="row"><span>共享块</span><b id="shared" class="accent">0</b></div>
+    <div class="row"><span>COW</span><b id="cow" class="hot">0</b></div>
+    <div class="sep"></div>
+    <div class="row sm"><span>kTemp</span><b id="temp">0.80</b></div>
+    <div class="row sm"><span>Top-K</span><b id="topk">40</b></div>
+    <div class="row sm"><span>n_past</span><b id="npast">0</b></div>
+  </aside>
+</div>
+<script src="app.js"></script></body></html>
