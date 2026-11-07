@@ -1,0 +1,6 @@
+[client] precheck open
+[client] precheck parsed
+[client] precheck bc=28 el=3584 nh=28 th=1000000.0 mold_theta=1000000
+[nova] 文件签名: arch=qwen2 layers=28 d=3584 heads=28:4 hd=128 ffn=18944 vocab=152064 ctx=32768 theta=1e+06 eps=1e-06 tied=0
+[nova] FATAL C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\client\..\include\nova/memory/arena.h:40  cudaMalloc(&base_, bytes) -> out of memory
+[nova]       设备内存不足：free 9.084 / total 11.000 GiB

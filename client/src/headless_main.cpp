@@ -15,8 +15,9 @@ int main(int argc, char** argv) {
     std::printf("[OK] load %.1f ms\n", std::chrono::duration<double, std::milli>(t1 - t0).count());
 
     // ---- 流式验证 ----
-    std::printf("[CHAT] 请推导 f(x)=x^3-3x 的极值点\n[STREAM] ");
-    host.chat("请推导 f(x)=x^3-3x 的极值点");
+    const char* prompt = argc > 2 ? argv[2] : "请推导 f(x)=x^3-3x 的极值点";
+    std::printf("[CHAT] %s\n[STREAM] ", prompt);
+    host.chat(prompt);
     int n = 0; const auto ts = std::chrono::steady_clock::now();
     while (host.busy() || n == 0) {
         host.pump([&](const std::string& tok) { std::printf("%s", tok.c_str()); std::fflush(stdout); ++n; });

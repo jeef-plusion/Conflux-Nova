@@ -4,7 +4,7 @@ let ws, last = '', chart, data = [], cur = null;
 const md = t => (window.marked ? marked.parse(t) : t.replace(/</g,'&lt;'));
 
 function connect(){
-  ws = new WebSocket('ws://127.0.0.1:17530');
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => send({cmd:'hello'});
   ws.onmessage = e => on(JSON.parse(e.data));
   ws.onclose = () => setTimeout(connect, 1000);
@@ -38,11 +38,17 @@ $('#send').onclick = () => {
 };
 $('#input').addEventListener('keydown', e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('#send').click();} });
 $('#browse').onclick = ()=> send({cmd:'pick'});
-$('#ignite').onclick = ()=>{
+$('#browse').style.display='none';   // 浏览器里用路径输入框
+$('#ignite').onclick = async ()=>{
   const p = $('#gguf').value.trim();
-  if(!p){ $('#stat').textContent='先选模型'; send({cmd:'pick'}); return; }
-  $('#stat').textContent = '加载中…';
-  send({cmd:'load', path:p});
+  if(!p){ $('#stat').textContent='先填模型路径'; return; }
+  $('#stat').textContent = '加载中…（7B 约 25 秒）'; $('#stat').style.color='#7d8b9c';
+  try {
+    const r = await fetch('/api/load', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path:p})});
+    const j = await r.json();
+    if(j.ok){ $('#stat').textContent='已加载'; $('#stat').style.color='#3ddc84'; }
+    else { $('#stat').textContent='失败: '+j.err; $('#stat').style.color='#ff6b5e'; }
+  } catch(e){ $('#stat').textContent='请求失败: '+e; }
 };
 $('#new').onclick = ()=>{ $('#chat').innerHTML=''; last=''; };
 $('#toggle').onclick = ()=>{ const r=$('#right'); r.style.display = r.style.display==='none'?'block':'none'; };
