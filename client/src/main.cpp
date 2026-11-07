@@ -110,10 +110,16 @@ static void init_webview(HWND hwnd) {
                 if (FAILED(hr) || !env) return hr;
                 env->CreateCoreWebView2Controller(hwnd,
                     Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                        [](HRESULT hr2, ICoreWebView2Controller* c) -> HRESULT {
+                        [hwnd](HRESULT hr2, ICoreWebView2Controller* c) -> HRESULT {
                             LOG("ctrl callback hr=0x%08X ctrl=%p", (unsigned)hr2, (void*)c);
                             if (FAILED(hr2) || !c) return hr2;
                             g_ctrl = c; g_ctrl->get_CoreWebView2(&g_web);
+                            // ← 必须立刻设置 bounds：WM_SIZE 在控制器存在之前就发过了
+                            RECT rc{}; GetClientRect(hwnd, &rc);
+                            const HRESULT hb = g_ctrl->put_Bounds(rc);
+                            LOG("bounds set %ldx%ld hr=0x%08X",
+                                (long)(rc.right - rc.left), (long)(rc.bottom - rc.top), (unsigned)hb);
+                            g_ctrl->put_IsVisible(TRUE);
                             // 背景透明（需要 Controller2）
                             ComPtr<ICoreWebView2Controller2> c2;
                             if (SUCCEEDED(g_ctrl->QueryInterface(IID_PPV_ARGS(c2.GetAddressOf())))) {
@@ -127,6 +133,25 @@ static void init_webview(HWND hwnd) {
                                     L"app.local", L"web", COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
                             }
                             LOG("mapping done, navigating");
+                            // 导航完成后自检：样式表数量 / 面板背景 / 正文长度
+                            EventRegistrationToken tk{};
+                            g_web->add_NavigationCompleted(
+                                Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* a) -> HRESULT {
+                                        BOOL ok = FALSE; a->get_IsSuccess(&ok);
+                                        LOG("nav completed success=%d", (int)ok);
+                                        g_web->ExecuteScript(
+                                            L"JSON.stringify({sheets:document.styleSheets.length,"
+                                            L"bg:getComputedStyle(document.querySelector('.left')||document.body).backgroundColor,"
+                                            L"bodyLen:document.body.innerText.length,"
+                                            L"title:document.title})",
+                                            Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+                                                [](HRESULT, LPCWSTR r) -> HRESULT {
+                                                    if (r) { char b[512]; WideCharToMultiByte(CP_UTF8,0,r,-1,b,512,nullptr,nullptr); LOG("dom: %s", b); }
+                                                    return S_OK;
+                                                }).Get());
+                                        return S_OK;
+                                    }).Get(), &tk);
                             g_web->Navigate(L"https://app.local/index.html");
                             LOG("navigated");
                             return S_OK;
