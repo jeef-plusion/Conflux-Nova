@@ -195,6 +195,7 @@ Device::~Device() {
 }
 
 void* Device::raw_alloc(std::uint64_t bytes, MemTag tag, const char* what, bool shared) {
+    if (kUsmShared) shared = true;   // UMA 平台：统一走 USM shared，避免热态隐式迁移
     if (bytes == 0) return nullptr;
     if (bytes > profile::kMaxAllocBytes) {
         // 单次分配上限是驱动的硬限制；宁可在这里说清楚，也不要让驱动返回 nullptr。

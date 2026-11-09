@@ -59,8 +59,15 @@ inline constexpr bool kFp16 = true;      // shaderFloat16
 #ifndef NOVA_SYCL_SG
 #  define NOVA_SYCL_SG 32
 #endif
-inline constexpr int kSyclSg = NOVA_SYCL_SG;
-static_assert(kSyclSg == 16 || kSyclSg == 32, "subgroup 只支持 16 / 32");
+#ifndef NOVA_SYCL_USM_SHARED
+#  define NOVA_SYCL_USM_SHARED 0
+#endif
+inline constexpr bool kUsmShared = NOVA_SYCL_USM_SHARED != 0;   // 0=权重/KV 走 device（实测更快）
+inline constexpr int kSyclSg = NOVA_SYCL_SG;              // 计算类内核（GEMV/quant/norm/rope）
+inline constexpr int kSyclSgCompute = NOVA_SYCL_SG;       // 同上，显式别名
+inline constexpr int kSyclSgAttn = 32;                    // attention 写死 32 lane（lane + 32*c）
+static_assert(kSyclSg == 8 || kSyclSg == 16 || kSyclSg == 32, "subgroup 只支持 8 / 16 / 32");
+static_assert(kSyclSgAttn == 32, "attention 内核按 32 lane 写死，必须是 32");
 
 #ifndef NOVA_SYCL_DP4A
 #  define NOVA_SYCL_DP4A 0

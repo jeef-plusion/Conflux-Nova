@@ -98,9 +98,9 @@ inline constexpr bool kRopeNeox  = (NOVA_SYCL_ROPE_NEOX != 0);
 static_assert(kGemvRows > 0 && kGemvRows * syclb::kSyclSg <= 1024, "GEMV work-group 超 1024");
 static_assert(kGemvRows * syclb::kSyclSg <= 512, "GEMV work-group 太大会压 occupancy");
 static_assert(kRmsWg % syclb::kSyclSg == 0 && kRmsWg <= 1024, "RMSNorm WG 必须是 subgroup 的整数倍");
-static_assert(kAttnDecWg % syclb::kSyclSg == 0, "decode split-K 的 WG 必须是 subgroup 的整数倍");
-static_assert(kAttnDecWg / syclb::kSyclSg >= 1 && kAttnDecWg / syclb::kSyclSg <= 8, "decode 每 WG 的 subgroup 数 1..8");
-static_assert(kPrefillTQ * syclb::kSyclSg <= 1024, "prefill WG 超 1024");
+static_assert(kAttnDecWg % syclb::kSyclSgAttn == 0, "decode split-K 的 WG 必须是 subgroup 的整数倍");
+static_assert(kAttnDecWg / syclb::kSyclSgAttn >= 1 && kAttnDecWg / syclb::kSyclSgAttn <= 8, "decode 每 WG 的 subgroup 数 1..8");
+static_assert(kPrefillTQ * syclb::kSyclSgAttn <= 1024, "prefill WG 超 1024");
 // prefill 的 KV tile 必须塞进 32 KB local
 static_assert(2 * kPrefillKC * kHD * 4 <= nova::syclb::profile::kLocalMemBytes,
               "prefill KV tile 超过 32 KiB local 上限");
