@@ -4,8 +4,9 @@
 // 与 CUDA 的 quant_kernel 语义逐位一致（同样的 amax/127 缩放、同样的 __float2int_rn
 // -> sycl::rint、同样的"每 16 元素求和"）。
 //
-// 布局选择：**一个 subgroup 吃一个 32 元素块**，lane 各持 1 个 float。
-// CUDA 版是一个 thread 吃 32 个元素（跨步 128 B 的访问模式）；这里 32 个 lane
+// 布局选择：**一个 subgroup 吃一个 32 元素块**，每个 lane 处理 PER = 32/SG 个元素
+//（SG=32 → 1 个、SG=16 → 2 个、SG=8 → 4 个，统一走 sycl_common.h 的 q8_block<>）。
+// CUDA 版是一个 thread 吃 32 个元素（跨步 128 B 的访问模式）；这里一个 subgroup
 // 合并成一条 128 B 的合并访问，是 iGPU 上更省的做法。
 #include "kernels.h"
 
@@ -21,7 +22,8 @@ public:
 
     [[sycl::reqd_sub_group_size(syclb::kSyclSg)]]
     void operator()(sycl::nd_item<1> it) const {
-        constexpr int NB = K / 32;
+        constexpr int NB  = K / 32;
+        constexpr int PER = 32 / syclb::kSyclSg;
         const int blk = static_cast<int>(it.get_global_linear_id() / syclb::kSyclSg);
         if (blk >= total_) return;
 
@@ -31,23 +33,28 @@ public:
         const int b    = blk - row * NB;
 
         const float* xp = x_ + static_cast<std::int64_t>(row) * K + b * 32;
-        const float  v  = xp[lane];
 
-        const float amax  = sg_max<float>(sg, sycl::fabs(v));
-        const float scale = amax * (1.f / 127.f);
-        const float inv   = (amax > 0.f) ? (127.f / amax) : 0.f;
-        const int   qi    = static_cast<int>(sycl::rint(v * inv));
+        // 一个 32 元素块由整个 subgroup 负责；SG<32 时每 lane 持 PER 个元素。
+        // 以前这里写死成「1 lane = 1 元素」，SG=16 时每个块只量化了前 16 个、s_hi 恒为 0
+        //（sycl_bench §8 的 quant 抽检抓到的：int8 不一致 3327 个）。
+        float v[PER];
+        #pragma unroll
+        for (int t = 0; t < PER; ++t) v[t] = xp[lane + t * syclb::kSyclSg];
 
-        qs_[static_cast<std::int64_t>(row) * K + b * 32 + lane] = static_cast<std::int8_t>(qi);
+        int qi[PER];
+        const Q8Block<syclb::kSyclSg> blkq = q8_block<syclb::kSyclSg>(sg, lane, v, qi);
 
-        const int s_lo = sg_sum<int>(sg, (lane < 16) ? qi : 0);
-        const int s_hi = sg_sum<int>(sg, (lane >= 16) ? qi : 0);
+        std::int8_t* qrow = qs_ + static_cast<std::int64_t>(row) * K + b * 32;
+        #pragma unroll
+        for (int t = 0; t < PER; ++t) {
+            qrow[lane + t * syclb::kSyclSg] = static_cast<std::int8_t>(qi[t]);
+        }
 
         if (lane == 0) {
-            d_[static_cast<std::int64_t>(row) * NB + b] = scale;
+            d_[static_cast<std::int64_t>(row) * NB + b] = blkq.scale;
             const std::int64_t sb = (static_cast<std::int64_t>(row) * NB + b) * 2;
-            s_[sb + 0] = s_lo;
-            s_[sb + 1] = s_hi;
+            s_[sb + 0] = blkq.s_lo;
+            s_[sb + 1] = blkq.s_hi;
         }
     }
 

@@ -84,6 +84,18 @@ void host_quant(ActQ8View a, const float* x, int rows) {
     quant_rows<kD>(a, x, rows, q);
 }
 
+// 融合版的激活生产者（norm.cpp），每层 decode 都走它
+void host_rmsnorm_quant(float* y, ActQ8View a, const float* x, const float* w, int rows) {
+    sycl::queue q;
+    rmsnorm_quant(y, a, x, w, rows, q);
+}
+
+// FFN 中段的融合激活生产者（elem.cpp）：silu(gate)*up + 量化
+void host_swiglu_quant(float* y, ActQ8View a, const float* gate, const float* up, int rows) {
+    sycl::queue q;
+    swiglu_quant<kD>(a, y, gate, up, rows, q);
+}
+
 } // namespace syclk
 } // namespace nova
 
@@ -193,6 +205,147 @@ int main(int argc, char** argv) {
     const ActQ8View act{qs.data(), xd.data(), xs.data()};
     nova::syclk::host_quant(act, x.data(), 1);
 
+    int pre_fail = 0;
+
+    // ---- 0. quant 逐元素对拍（SG=16 曾经在这里挂过：每个 32 元素块只量化了前 16 个）----
+    std::printf("\n--- 0. quant 逐元素对拍（SG=%d，每 lane %d 个元素）---\n",
+                nova::syclb::kSyclSg, 32 / nova::syclb::kSyclSg);
+    {
+        const int QR = 3;
+        const int NB = K / 32;
+        std::vector<float> qx(static_cast<std::size_t>(QR) * K);
+        Rng rng;
+        for (auto& v : qx) v = rng.next() * 4.f;
+        std::vector<std::int8_t>  q_qs(static_cast<std::size_t>(QR) * K);
+        std::vector<float>        q_d(static_cast<std::size_t>(QR) * NB);
+        std::vector<std::int32_t> q_s(static_cast<std::size_t>(QR) * NB * 2);
+        const ActQ8View qa{q_qs.data(), q_d.data(), q_s.data()};
+        nova::syclk::host_quant(qa, qx.data(), QR);
+
+        int bad_q = 0, bad_s = 0;
+        double max_ds = 0.0;
+        for (int r = 0; r < QR; ++r) {
+            for (int b = 0; b < NB; ++b) {
+                const float* xp = qx.data() + static_cast<std::size_t>(r) * K + b * 32;
+                float amax = 0.f;
+                for (int i = 0; i < 32; ++i) amax = std::fmax(amax, std::fabs(xp[i]));
+                const float sc  = amax * (1.f / 127.f);
+                const float inv = (amax > 0.f) ? (127.f / amax) : 0.f;
+                int s0 = 0, s1 = 0;
+                for (int i = 0; i < 32; ++i) {
+                    const int q = static_cast<int>(std::rint(xp[i] * inv));
+                    if (q != static_cast<int>(q_qs[static_cast<std::size_t>(r) * K + b * 32 + i])) ++bad_q;
+                    (i < 16 ? s0 : s1) += q;
+                }
+                const std::size_t sb = static_cast<std::size_t>(r) * NB + b;
+                max_ds = std::fmax(max_ds, std::fabs(static_cast<double>(sc) - q_d[sb]));
+                if (s0 != q_s[sb * 2 + 0]) ++bad_s;
+                if (s1 != q_s[sb * 2 + 1]) ++bad_s;
+            }
+        }
+        const bool ok = (bad_q == 0 && bad_s == 0);
+        std::printf("  quant_rows    int8 不一致 %d；16-和 不一致 %d；scale max_abs %.3e  %s\n",
+                    bad_q, bad_s, max_ds, ok ? "PASS" : "FAIL");
+        if (!ok) ++pre_fail;
+    }
+
+    // ---- 0b. rmsnorm_quant：用 kernel 自己的 y 反推 q8，验证 32 个元素全被量化 ----
+    std::printf("\n--- 0b. rmsnorm_quant 的 q8 自洽性 ---\n");
+    {
+        const int NB = K / 32;
+        const float eps = nova::syclk::kEps;
+        std::vector<float> rx(static_cast<std::size_t>(K)), rw(static_cast<std::size_t>(K));
+        Rng rng;
+        for (auto& v : rx) v = rng.next() * 3.f;
+        for (auto& v : rw) v = 1.f + 0.1f * rng.next();
+
+        std::vector<float> ry(static_cast<std::size_t>(K));
+        std::vector<std::int8_t>  rqs(static_cast<std::size_t>(K));
+        std::vector<float>        rd(static_cast<std::size_t>(NB));
+        std::vector<std::int32_t> rs(static_cast<std::size_t>(NB) * 2);
+        const ActQ8View rv{rqs.data(), rd.data(), rs.data()};
+        nova::syclk::host_rmsnorm_quant(ry.data(), rv, rx.data(), rw.data(), 1);
+
+        // (a) y 对不对：与 double 参考比
+        double ss = 0.0;
+        for (int i = 0; i < K; ++i) ss += static_cast<double>(rx[static_cast<std::size_t>(i)]) * rx[static_cast<std::size_t>(i)];
+        const double sc_ref = 1.0 / std::sqrt(ss / static_cast<double>(K) + static_cast<double>(eps));
+        std::vector<double> yr(static_cast<std::size_t>(K));
+        for (int i = 0; i < K; ++i) {
+            yr[static_cast<std::size_t>(i)] = static_cast<double>(rx[static_cast<std::size_t>(i)]) * sc_ref *
+                                              static_cast<double>(rw[static_cast<std::size_t>(i)]);
+        }
+        const Err ey = vs_ref(ry.data(), yr.data(), K);
+
+        // (b) q8 自洽：d 必须等于 max|y|/127，两个 16-和必须等于对应半块 rint(y*inv) 的和
+        int bad_s = 0, bad_d = 0;
+        for (int b = 0; b < NB; ++b) {
+            const float* yp = ry.data() + b * 32;
+            float amax = 0.f;
+            for (int i = 0; i < 32; ++i) amax = std::fmax(amax, std::fabs(yp[i]));
+            const float inv = (amax > 0.f) ? (127.f / amax) : 0.f;
+            int s0 = 0, s1 = 0;
+            for (int i = 0; i < 32; ++i) {
+                const int q = static_cast<int>(std::rint(yp[i] * inv));
+                if (q != static_cast<int>(rqs[static_cast<std::size_t>(b) * 32 + i])) ++bad_s;
+                (i < 16 ? s0 : s1) += q;
+            }
+            if (std::fabs(static_cast<double>(amax * (1.f / 127.f)) - rd[static_cast<std::size_t>(b)]) > 1e-9) ++bad_d;
+            if (s0 != rs[static_cast<std::size_t>(b) * 2 + 0]) ++bad_s;
+            if (s1 != rs[static_cast<std::size_t>(b) * 2 + 1]) ++bad_s;
+        }
+        const bool ok = (ey.rel_l2 < 1e-6) && (bad_s == 0) && (bad_d == 0);
+        std::printf("  rmsnorm_quant y rel_l2 %.3e；q8 不一致 %d；scale 不一致 %d  %s\n",
+                    ey.rel_l2, bad_s, bad_d, ok ? "PASS" : "FAIL");
+        if (!ok) ++pre_fail;
+    }
+
+    // ---- 0c. swiglu_quant：silu(gate)*up + 量化（FFN 中段，每层也走它）----
+    std::printf("\n--- 0c. swiglu_quant 的 q8 自洽性 ---\n");
+    {
+        const int NB = K / 32;
+        std::vector<float> hg(static_cast<std::size_t>(K)), hu(static_cast<std::size_t>(K));
+        Rng rng;
+        for (auto& v : hg) v = rng.next() * 3.f;
+        for (auto& v : hu) v = rng.next() * 2.f;
+
+        std::vector<float> sy(static_cast<std::size_t>(K));
+        std::vector<std::int8_t>  sqs(static_cast<std::size_t>(K));
+        std::vector<float>        sd(static_cast<std::size_t>(NB));
+        std::vector<std::int32_t> ss_(static_cast<std::size_t>(NB) * 2);
+        const ActQ8View sv{sqs.data(), sd.data(), ss_.data()};
+        nova::syclk::host_swiglu_quant(sy.data(), sv, hg.data(), hu.data(), 1);
+
+        std::vector<double> yr(static_cast<std::size_t>(K));
+        for (int i = 0; i < K; ++i) {
+            const double gv = hg[static_cast<std::size_t>(i)];
+            const double uv = hu[static_cast<std::size_t>(i)];
+            yr[static_cast<std::size_t>(i)] = (gv / (1.0 + std::exp(-gv))) * uv;
+        }
+        const Err ey = vs_ref(sy.data(), yr.data(), K);
+
+        int bad_s = 0, bad_d = 0;
+        for (int b = 0; b < NB; ++b) {
+            const float* yp = sy.data() + b * 32;
+            float amax = 0.f;
+            for (int i = 0; i < 32; ++i) amax = std::fmax(amax, std::fabs(yp[i]));
+            const float inv = (amax > 0.f) ? (127.f / amax) : 0.f;
+            int s0 = 0, s1 = 0;
+            for (int i = 0; i < 32; ++i) {
+                const int q = static_cast<int>(std::rint(yp[i] * inv));
+                if (q != static_cast<int>(sqs[static_cast<std::size_t>(b) * 32 + i])) ++bad_s;
+                (i < 16 ? s0 : s1) += q;
+            }
+            if (std::fabs(static_cast<double>(amax * (1.f / 127.f)) - sd[static_cast<std::size_t>(b)]) > 1e-9) ++bad_d;
+            if (s0 != ss_[static_cast<std::size_t>(b) * 2 + 0]) ++bad_s;
+            if (s1 != ss_[static_cast<std::size_t>(b) * 2 + 1]) ++bad_s;
+        }
+        const bool ok = (ey.rel_l2 < 1e-5) && (bad_s == 0) && (bad_d == 0);
+        std::printf("  swiglu_quant y rel_l2 %.3e；q8 不一致 %d；scale 不一致 %d  %s\n",
+                    ey.rel_l2, bad_s, bad_d, ok ? "PASS" : "FAIL");
+        if (!ok) ++pre_fail;
+    }
+
     // ---- 参考值 ----
     std::vector<double> ref(static_cast<std::size_t>(R));
     cpu_ref(w.data(), R, K, qs.data(), xd.data(), ref.data());
@@ -207,7 +360,7 @@ int main(int argc, char** argv) {
                 "变体", "SPLIT", "SEG", "NP", "rows/WG", "groups", "rel_l2", "max_abs", "vs基线", "判定");
     std::printf("  -----------------------------------------------------------------------------------------------------------\n");
 
-    int failed = 0;
+    int failed = pre_fail;
     std::vector<std::vector<float>> outs(static_cast<std::size_t>(nv), std::vector<float>(static_cast<std::size_t>(R)));
     for (int v = 0; v < nv; ++v) {
         const Variant& va = variants[v];

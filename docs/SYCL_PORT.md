@@ -369,6 +369,17 @@ build_sycl_host.bat 7b 16
 build\sycl_gemv_host_check_7b_sg16.exe build\q4k.gguf
 ```
 
+它现在覆盖四类东西：
+
+| 检查 | 内容 | 判据 |
+|---|---|---|
+| §0 `quant_rows` | 逐元素对拍（int8 / 16-元素和 / scale） | 必须 **0 个不一致** |
+| §0b `rmsnorm_quant` | y 对 double 参考 + q8 自洽（每块 32 个元素都被量化） | rel_l2 < 1e-6 且 0 个不一致 |
+| §0c `swiglu_quant` | 同上 | rel_l2 < 1e-5 且 0 个不一致 |
+| §1/§2 GEMV | 四个 lane 映射变体 + 尾部守卫 | rel_l2 < 1e-4 |
+
+（2026-11-09 抓到的 SG=16 quant bug 就是 §0 这一行暴露的，见 `PERF_BASELINE.md` §10。）
+
 结果（四个变体 × 两个张量 × SG 16/32 全 PASS，`rel_l2 < 1e-4`）：
 
 | 张量 | SG | SPLITS=1 | SPLITS=2 | SPLITS=4 连续 | SPLITS=4 交错 |

@@ -117,6 +117,9 @@ static_assert(kRmsWg % syclb::kSyclSg == 0 && kRmsWg <= 1024, "RMSNorm WG 必须
 static_assert(kAttnDecWg % syclb::kSyclSgAttn == 0, "decode split-K 的 WG 必须是 subgroup 的整数倍");
 static_assert(kAttnDecWg / syclb::kSyclSgAttn >= 1 && kAttnDecWg / syclb::kSyclSgAttn <= 8, "decode 每 WG 的 subgroup 数 1..8");
 static_assert(kPrefillTQ * syclb::kSyclSgAttn <= 1024, "prefill WG 超 1024");
+// quant / rmsnorm_quant / swiglu_quant 都是「一个 subgroup 量化一个 32 元素块」，
+// 每 lane 处理 32/SG 个元素；SG 必须能整除 32（8/16/32 都行，其它值直接编译期挡）。
+static_assert(32 % syclb::kSyclSg == 0, "subgroup 必须能整除 Q4_K 的 32 元素子块");
 // prefill 的 KV tile 必须塞进 32 KB local
 static_assert(2 * kPrefillKC * kHD * 4 <= nova::syclb::profile::kLocalMemBytes,
               "prefill KV tile 超过 32 KiB local 上限");
@@ -210,6 +213,44 @@ inline T sg_max(const sycl::sub_group& sg, T v) {
 template <typename T>
 inline T sg_bcast(const sycl::sub_group& sg, T v) {
     return sycl::group_broadcast(sg, v, std::size_t{0});
+}
+
+// ---- 一个 subgroup 量化一个 32 元素块 --------------------------------------
+// Q4_K 的激活块是 32 个元素（每 16 个一个 int 和），而 subgroup 可以是 8/16/32，
+// 所以每个 lane 要处理 PER = 32/SG 个元素。
+// 2026-11-09 修：以前这里写死成「1 lane = 1 元素」，SG=16 时每个块只量化了前 16 个元素、
+// s_hi 恒为 0（`sycl_bench` §8 的 quant 抽检抓到的：SG=16 时 int8 不一致 3327 个）。
+template <int SG>
+struct Q8Block {
+    static constexpr int PER = 32 / SG;   // 每 lane 处理的元素数
+    float scale;
+    int   s_lo;                            // 元素 0..15 的和
+    int   s_hi;                            // 元素 16..31 的和
+};
+
+// 输入本 lane 的 PER 个值（v），输出量化值（qi）+ 本块的 scale 与两个半块和。
+// 所有 lane 都必须调用（内部走 subgroup 归约）。
+template <int SG>
+inline Q8Block<SG> q8_block(const sycl::sub_group& sg, int lane, const float* v, int* qi) {
+    static_assert(32 % SG == 0, "subgroup 必须能整除 Q4_K 的 32 元素子块");
+    float amax = 0.f;
+    #pragma unroll
+    for (int t = 0; t < Q8Block<SG>::PER; ++t) amax = sycl::fmax(amax, sycl::fabs(v[t]));
+    amax = sg_max<float>(sg, amax);
+    const float scale = amax * (1.f / 127.f);
+    const float inv   = (amax > 0.f) ? (127.f / amax) : 0.f;
+    int s0 = 0, s1 = 0;
+    #pragma unroll
+    for (int t = 0; t < Q8Block<SG>::PER; ++t) {
+        qi[t] = static_cast<int>(sycl::rint(v[t] * inv));
+        if (lane + t * SG < 16) s0 += qi[t];
+        else                    s1 += qi[t];
+    }
+    Q8Block<SG> r;
+    r.scale = scale;
+    r.s_lo  = sg_sum<int>(sg, s0);
+    r.s_hi  = sg_sum<int>(sg, s1);
+    return r;
 }
 
 

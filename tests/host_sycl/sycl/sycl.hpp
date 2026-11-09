@@ -42,7 +42,13 @@ namespace sycl {
 
 // 数学函数：真 SYCL 在 sycl:: 里也有一套，这里直接借 std 的
 using std::fabs;
+using std::fmax;
+using std::fmin;
+using std::exp;
+using std::fma;
 using std::rint;
+using std::sqrt;
+inline float rsqrt(float x) { return 1.f / std::sqrt(x); }
 
 // ===========================================================================
 // range / nd_range / access

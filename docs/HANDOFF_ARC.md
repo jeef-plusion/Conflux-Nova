@@ -209,9 +209,33 @@ Git       C:\Tools\MinGit\cmd\git.exe
 
 ---
 
+## 7.5 另一个 bug（已修）：SG=16 时 quant 是坏的
+
+`sycl_bench` §8 的 `quant` 抽检**一直在报 FAIL**，收尾时查清不是噪声：
+
+| 构建 | 抽检结果 |
+|---|---|
+| SG=16（所有基线的口径） | int8 不一致 **3327** 个、和 217 个、scale 1.2e-02 → **FAIL** |
+| SG=32 | 全部 **0** → ok |
+
+根因：`quant.cpp` / `norm.cpp:rmsnorm_quant` / `elem.cpp:swiglu_quant` 都写死了
+「1 lane = 1 个元素」，而一个激活块是 **32 个元素**。SG=16 时每块只量了前 16 个，
+16..31 号元素从未被写、`s_hi` 恒为 0、`amax` 只在前半块里取 —— **SG=16 喂给 GEMV 的激活一半是垃圾**。
+
+为什么没早发现：`GEMV rel_l2` 用的是从设备下载回来的那份激活做参考，和设备自洽 → 一起错一起 PASS。
+**「GEMV 数值对」不等于「激活对」**。
+
+已修：`sycl_common.h` 新增 `Q8Block<SG>` / `q8_block<SG>()`（每 lane 处理 `32/SG` 个元素，
+三个生产者共用），并加 `static_assert(32 % kSyclSg == 0)`。
+CPU 垫片验证（SG=16/32 各一遍）：`quant_rows` 0 个不一致、`rmsnorm_quant` / `swiglu_quant`
+y 的 rel_l2 3.5e-08 / 5.1e-08 且 q8 全自洽。详见 `PERF_BASELINE.md` §10。
+
+---
+
 ## 8. 绝对不要做的事
 
 - **不要**为每一档重新编译再比（编译 2~3 分钟全核打满，是最大热源）；
+- **不要**只跑带宽段就下结论 —— `sycl_bench` 的 `quant` 抽检那行也必须看（它抓过真 bug，见 §7.5）；
 - **不要**在测量之间 sleep「冷却」——短测量 + 空闲 = 测到 idle 时钟（实测 50 → 100 us，最坏 19.7 ms）；
 - **不要**用 10 次发射这种短测量下结论（0.5 ms，进不了稳态）；
 - **不要**让两个基准/编译同时跑（并发污染实测 16.09 vs 36.8）；

@@ -422,5 +422,45 @@ build\sycl\sycl_bench.exe --gguf build\q4k_15b.gguf --iters 300 --ab-iters 2000 
 
 所以准确的结论是：**「SYCL 算子层 + GEMV 带宽」毕业；「端到端 tok/s」还没开始测（不是没达标）。**
 
+## 10. 收尾时抓到的第二个 bug：SG=16 时 quant 是坏的（已修）
+
+`sycl_bench` §8 的 quant 抽检**一直在报 FAIL**，被当成"已知噪声"放过了。收尾时拿两次归档日志一对，
+它不是噪声：
+
+| 构建 | `quant` 抽检 |
+|---|---|
+| `-DNOVA_SYCL_SG=16`（PERF_BASELINE 全部基线的口径） | **int8 不一致 3327 个；16-元素和 不一致 217 个；scale max_abs 1.216e-02 → FAIL** |
+| `-DNOVA_SYCL_SG=32` | int8 不一致 **0**；和 **0**；scale **0.000e+00 → ok** |
+
+根因：`quant.cpp : QuantKernel`（以及 `norm.cpp : rmsnorm_quant`、`elem.cpp : swiglu_quant`）
+写死了「**1 lane = 1 个元素**」，而一个 Q4_K 的激活块是 **32 个元素**。
+SG=32 时侥幸成立；SG=16 时每个 subgroup 只覆盖了 32 个元素里的前 16 个 ——
+**每个块的 16..31 号元素从来没被量化过，`s_hi` 恒为 0，`amax` 只在前 16 个里取**。
+也就是说 SG=16 这套配置喂给 GEMV 的激活有一半是垃圾。
+
+为什么以前没被发现：`§2.2` 的 `GEMV rel_l2` 用的是**从设备下载回来的那份激活**做参考，
+和设备 kernel 自洽 → 参考值也跟着一起错，于是 8.437e-08 依然 PASS。
+**「GEMV 数值对」不等于「激活对」**，这次是 quant 那一条独立抽检把它抓住的。
+
+修法：`sycl_common.h` 加 `Q8Block<SG>` / `q8_block<SG>()` —— 一个 subgroup 量化一个 32 元素块，
+每 lane 处理 `PER = 32/SG` 个元素，三个生产者共用同一份实现；`sycl_common.h` 再加
+`static_assert(32 % kSyclSg == 0)` 把非法的 SG 挡在编译期。
+
+验证（`build_sycl_host.bat`，CPU 垫片跑真 kernel，SG=16 与 SG=32 各一遍）：
+
+```
+quant_rows    int8 不一致 0；16-和 不一致 0；scale max_abs 0.000e+00  PASS
+rmsnorm_quant y rel_l2 3.472e-08；q8 不一致 0；scale 不一致 0  PASS
+swiglu_quant  y rel_l2 5.060e-08；q8 不一致 0；scale 不一致 0  PASS
+```
+
+三个融合/独立量化路径都从「每 lane 一个元素」改成「每 lane PER 个元素」，`qs/d/s` 布局不变，
+下游 GEMV / attention 的读取代码一行没动。
+
+**对已有结论的影响**：带宽数字不受影响（读的字节数一样）；方案 C 的 A/B 也不受影响
+（四个臂吃的是同一份激活）。受影响的只有「§2.2 的 rel_l2 是环状自洽」这一点，
+以及「SG=16 能不能拿来跑真模型」——修之前不能，修之后可以。
+
+
 
 

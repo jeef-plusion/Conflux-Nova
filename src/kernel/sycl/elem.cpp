@@ -127,26 +127,32 @@ public:
         const int sgid = tid / syclb::kSyclSg;
 
         const std::int64_t base = static_cast<std::int64_t>(row) * K;
+        // 一个 32 元素块由整个 subgroup 负责；SG<32 时每 lane 持 PER 个元素
+        //（以前写死 1 lane = 1 元素，SG=16 时每块只量化了一半，s_hi 恒为 0）。
+        constexpr int PER = 32 / syclb::kSyclSg;
         for (int b = sgid; b < NB; b += kSgPerWg) {
-            const int   i = b * 32 + lane;
-            const float g = gate_[base + i];
-            const float u = up_[base + i];
-            const float v = (g / (1.f + sycl::exp(-g))) * u;
-            y_[base + i] = v;
+            float v[PER];
+            #pragma unroll
+            for (int t = 0; t < PER; ++t) {
+                const int i = b * 32 + lane + t * syclb::kSyclSg;
+                const float g = gate_[base + i];
+                const float u = up_[base + i];
+                v[t] = (g / (1.f + sycl::exp(-g))) * u;
+                y_[base + i] = v[t];
+            }
 
-            const float amax = sg_max<float>(sg, sycl::fabs(v));
-            const float sc   = amax * (1.f / 127.f);
-            const float inv  = (amax > 0.f) ? (127.f / amax) : 0.f;
-            const int   qi   = static_cast<int>(sycl::rint(v * inv));
-            qs_[base + i] = static_cast<std::int8_t>(qi);
+            int qi[PER];
+            const Q8Block<syclb::kSyclSg> blk = q8_block<syclb::kSyclSg>(sg, lane, v, qi);
 
-            const int s_lo = sg_sum<int>(sg, (lane < 16) ? qi : 0);
-            const int s_hi = sg_sum<int>(sg, (lane >= 16) ? qi : 0);
+            #pragma unroll
+            for (int t = 0; t < PER; ++t) {
+                qs_[base + b * 32 + lane + t * syclb::kSyclSg] = static_cast<std::int8_t>(qi[t]);
+            }
             if (lane == 0) {
-                d_[base / 32 + b] = sc;
+                d_[base / 32 + b] = blk.scale;
                 const std::int64_t sb = (base / 32 + b) * 2;
-                s_[sb + 0] = s_lo;
-                s_[sb + 1] = s_hi;
+                s_[sb + 0] = blk.s_lo;
+                s_[sb + 1] = blk.s_hi;
             }
         }
     }

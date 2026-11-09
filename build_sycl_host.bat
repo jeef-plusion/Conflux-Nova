@@ -62,7 +62,7 @@ if not exist build mkdir build
 if not exist "build\hc_%MODEL_TAG%_%SG%" mkdir "build\hc_%MODEL_TAG%_%SG%"
 
 echo [host] building model=%MODEL_TAG% SG=%SG%
-cl /nologo /std:c++17 /O2 /EHsc /utf-8 /wd4068 /wd5030 /Iinclude /Icode\device\sycl /Isrc\kernel\sycl /Itests\host_sycl %MODEL_DEF% -DNOVA_SYCL_DP4A=0 -DNOVA_SYCL_SG=%SG% -DNOVA_SYCL_GEMV_ROWS=8 tests\sycl_gemv_host_check.cpp src\kernel\sycl\quant.cpp src\loader\gguf.cpp /Fe:build\sycl_gemv_host_check_%MODEL_TAG%_sg%SG%.exe /Fo:build\hc_%MODEL_TAG%_%SG%\
+cl /nologo /std:c++17 /O2 /EHsc /utf-8 /wd4068 /wd5030 /Iinclude /Icode\device\sycl /Isrc\kernel\sycl /Itests\host_sycl %MODEL_DEF% -DNOVA_SYCL_DP4A=0 -DNOVA_SYCL_SG=%SG% -DNOVA_SYCL_GEMV_ROWS=8 tests\sycl_gemv_host_check.cpp src\kernel\sycl\quant.cpp src\kernel\sycl\norm.cpp src\kernel\sycl\elem.cpp src\loader\gguf.cpp /Fe:build\sycl_gemv_host_check_%MODEL_TAG%_sg%SG%.exe /Fo:build\hc_%MODEL_TAG%_%SG%\
 if errorlevel 1 goto fail
 
 echo.

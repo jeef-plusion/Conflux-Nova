@@ -82,24 +82,30 @@ void rmsnorm_quant(float* y, ActQ8View dst, const float* x, const float* w, int 
                 const float scale = sycl::rsqrt(total * (1.f / static_cast<float>(K)) + kEps);
 
                 std::int8_t* qrow = dst.qs + static_cast<std::int64_t>(row) * K;
+                // 一个 32 元素块由整个 subgroup 负责；SG<32 时每 lane 持 PER 个元素
+                //（以前写死 1 lane = 1 元素，SG=16 时每块只量化了一半，s_hi 恒为 0）。
+                constexpr int PER = 32 / syclb::kSyclSg;
                 for (int b = sgid; b < NB; b += kNSG) {
-                    const int   i = b * 32 + lane;
-                    const float v = xr[i] * scale * w[i];
-                    yr[i] = v;
+                    float v[PER];
+                    #pragma unroll
+                    for (int t = 0; t < PER; ++t) {
+                        const int i = b * 32 + lane + t * syclb::kSyclSg;
+                        v[t] = xr[i] * scale * w[i];
+                        yr[i] = v[t];
+                    }
 
-                    const float amax = sg_max<float>(sg, sycl::fabs(v));
-                    const float sc   = amax * (1.f / 127.f);
-                    const float inv  = (amax > 0.f) ? (127.f / amax) : 0.f;
-                    const int   qi   = static_cast<int>(sycl::rint(v * inv));
-                    qrow[i] = static_cast<std::int8_t>(qi);
+                    int qi[PER];
+                    const Q8Block<syclb::kSyclSg> blk = q8_block<syclb::kSyclSg>(sg, lane, v, qi);
 
-                    const int s_lo = sg_sum<int>(sg, (lane < 16) ? qi : 0);
-                    const int s_hi = sg_sum<int>(sg, (lane >= 16) ? qi : 0);
+                    #pragma unroll
+                    for (int t = 0; t < PER; ++t) {
+                        qrow[b * 32 + lane + t * syclb::kSyclSg] = static_cast<std::int8_t>(qi[t]);
+                    }
                     if (lane == 0) {
-                        dst.d[static_cast<std::int64_t>(row) * NB + b] = sc;
+                        dst.d[static_cast<std::int64_t>(row) * NB + b] = blk.scale;
                         const std::int64_t sb = (static_cast<std::int64_t>(row) * NB + b) * 2;
-                        dst.s[sb + 0] = s_lo;
-                        dst.s[sb + 1] = s_hi;
+                        dst.s[sb + 0] = blk.s_lo;
+                        dst.s[sb + 1] = blk.s_hi;
                     }
                 }
             });
