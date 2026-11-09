@@ -673,3 +673,84 @@ build\sycl\sycl_bench_c.exe --gguf build\q4k_15b.gguf --iters 300 --ab-iters 200
 前提同样是**先用 §11.5 那套测量协议**（长测量、同轮交替、单进程），否则又会量到 18 GB/s 那种假象。
 
 
+
+---
+
+## 12. 端到端 decode runner（2026-11-09，第一次真模型跑通）
+
+前面 §1-§11 都是**算子层**：每个 kernel 单独对拍、单独计时。这一节是**第一次把 28 层串起来**，
+用真模型、真 KV、真采样跑出一次完整 decode。
+
+### 12.1 在哪、怎么跑
+
+| 文件 | 作用 |
+|---|---|
+| `code/model/sycl/runner.h` / `.cpp` | `sycls::E2ERunner`：加载 GGUF → embed → 28 层 × 12 算子 → head → 采样 |
+| `tests/sycl_e2e.cpp` | 命令行驱动：分词 → 喂 prompt → 逐 token 生成 → 打印 tok/s 与文本 |
+| `build_sycl_e2e.bat` | 构建入口（icpx + 全算子层 + runner） |
+
+```bat
+build_sycl_e2e.bat 1.5b
+build\sycl\sycl_e2e.exe --gguf build\q4k_15b.gguf --tokens 24
+```
+
+### 12.2 与 CUDA 版的对应关系
+
+| CUDA（code/graph/dense.h + src/model.cpp） | SYCL（runner.cpp） |
+|---|---|
+| AttnNormOp：rms_norm + quant | `rmsnorm_quant(h, A, x, attn_norm)`（融合，省一次 dispatch） |
+| QkvProjOp：q/k/v 三个 gemm_q4k | 三个 `gemv<kD, true>` |
+| QkvBiasOp | 三个 `bias_add`（`Model::qkv_bias` 编译期决定有没有） |
+| RopeKvOp：rope_batch + kv_store_paged | `rope_apply` + `kv_store`（连续 KV，非 paged） |
+| AttnOp：attn_decode_paged | `attn_decode` |
+| OProjOp：quant + o_proj | `quant_rows<kD>` + `gemv<kD, true>` |
+| ResidOp | `residual_add` |
+| FfnNormOp / GateUpOp / SwiGluOp / DownOp | `rmsnorm_quant` / 两个 `gemv<kD, true>` / `swiglu_ffn` / `gemv<kFFN, true>` |
+| head()：rms_norm + quant + lm_head | 同构；tie 时 lm_head 直接复用 token_embd |
+| sample_last()：top-k 40 / top-p 0.95 / temp 0.8 | 同一套参数，host 侧（SYCL 还没有 sample kernel） |
+
+**三处有意的简化**（里程碑切割，不是能力缺失）：
+
+1. KV 是**连续布局** `[L][ctx][NKV*HD]`，不是 CUDA 的共享块池 + 块表 → 没有 paged / COW；
+2. prompt 是**逐 token 喂**的（decode 口径），没有走 `attn_prefill` 的批量路径；
+3. 采样在 host 上做（每 token 拉回 V 个 float = 608 KB）。
+
+### 12.3 第一次跑通的实测（Arc 130T / 1.5B / SG=16 / DP4A=0）
+
+```
+[e2e] 模型: DeepSeek R1 Distill Qwen 1.5B Abliterated（151936 个 token）
+[e2e] 模板: r1-abliterated        <- 按词表自动探测
+[e2e] prompt 4 个 token: 151644 108386 151643 151645
+[runner] 形状: L=28 D=1536 NH=12 NKV=2 HD=128 FFN=8960 V=151936 ctx=512 tied=1
+[runner] 权重加载完成: 953.8 MiB，耗时 0.95 s
+[e2e] prompt 处理 4 个 token，111.24 ms（36.0 tok/s）
+[e2e] 生成 24 个 token：28.14 ms/token -> 35.54 tok/s（decode，不含 prompt）
+
+<think>
+</think>
+你好！请告诉我有什么可以帮助你的？
+```
+
+- **35.54 tok/s 是实测的端到端 decode**（不是带宽模型推算）。28 层 × 14 次 dispatch ≈ 392 次/token，
+  dispatch 只占 ~2 ms（5.6%）。
+- 实测有效带宽 = 953.8 MiB / 28.14 ms ≈ **33.9 GB/s**，与算子基准的 36.8~38.8 同量级。
+- 与 §9.2 的推算（41~44 tok/s）差 15~20%：① 每层还有 rmsnorm/rope/attn/swiglu 等非 GEMV 算子；
+  ② 真模型权重是**按层顺序流一遍**（每层 ~26 MB），不像基准里那个 1.27 MiB 张量一直待在 L3。
+
+### 12.4 跑通过程中抓到的两个 bug（都不在 kernel 层）
+
+1. **特殊 token 被 BPE 拆开**：`<|im_start|>` 本该是 1 个 token（151644），tokenizer 却拆成
+   `<` `|` `im` `_start` `|` `>` 6 个 → 模型收到字面文本，prompt 全错、输出是乱的。
+   修法：`Tokenizer` 加「`<` 开头、`>` 结尾的词表项整体匹配」（`init_special` / `starts_special`，
+   最长匹配优先）。**这个 bug 同时影响 CUDA 路径**（同一个 tokenizer、同一套 render）。
+2. **目标机上的 `q4k_15b.gguf` 不是 Qwen2.5-1.5B**：`general.name` 是
+   `DeepSeek R1 Distill Qwen 1.5B Abliterated`，词表里没有 `<|im_start|>`，用的是
+   `<｜User｜>` / `<｜Assistant｜>`（全角 ｜）。`sycl_e2e` 现在按词表**自动选模板**
+   （chatml / r1 / none），不再写死 ChatML。
+
+### 12.5 下一步（按性价比）
+
+1. **批量 prefill**：接 `attn_prefill`，prompt 一次前向（现在 23 token 的 prompt 要 23 次前向）；
+2. **paged / COW KV**：多会话的前提，CUDA 版已有（`graph/kv_pool.h`）；
+3. **sample kernel**：省掉每 token 608 KB 的 logits 回传；
+4. SoA 权重重排（§9.3 ②，11% 收益）——runner 跑通之后才值得做。

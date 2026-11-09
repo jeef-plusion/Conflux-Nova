@@ -1,5 +1,6 @@
 // code/map/qwen2.5/tokenizer.h — GGUF 词表 + 字节级 BPE
 #pragma once
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -27,6 +28,7 @@ public:
         const auto& mg = g.str_array("tokenizer.ggml.merges");
         merge_.reserve(mg.size() * 2);
         for (int i = 0; i < (int)mg.size(); ++i) merge_.emplace(mg[i], i);
+        init_special();             // <|im_start|> 这类控制符必须整体匹配（不能被 BPE 拆开）
         init_rev();                 // 预先建好反查表，避免多线程首次调用时竞争
     }
 
@@ -34,9 +36,24 @@ public:
         std::vector<int> out;
         size_t i = 0;
         while (i < text.size()) {
+            // 1) 特殊 token 优先：整个匹配，直接产出一个 id
+            //    （以前没有这一步，'<|im_start|>' 会被拆成 6 个普通 token，
+            //      模型收到的是文本而不是控制符 —— prompt 全错，输出就是乱码）
+            int sid = -1;
+            size_t slen = 0;
+            for (const auto& sp : special_) {
+                if (text.compare(i, sp.first.size(), sp.first) == 0) {
+                    sid  = sp.second;
+                    slen = sp.first.size();
+                    break;                 // special_ 按长度降序，第一个命中就是最长匹配
+                }
+            }
+            if (sid >= 0) { out.push_back(sid); i += slen; continue; }
+
+            // 2) 普通词：到下一个空格 / 特殊 token 起点为止
             size_t j = i;
-            if (text[j] == ' ') ++j;                       // 前导空格跟随后面的词
-            while (j < text.size() && text[j] != ' ') ++j;
+            if (text[j] == ' ') ++j;
+            while (j < text.size() && text[j] != ' ' && !starts_special(text, j)) ++j;
             bpe_word(text.substr(i, j - i), out);
             i = j;
         }
@@ -71,6 +88,32 @@ public:
 
 private:
     static int utf8_len(unsigned char c) { return c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4; }
+
+    // 词表里形如 <|im_start|> / <｜User｜> / <|EOT|> 的控制符。
+    // 判据故意放宽成「< 开头、> 结尾」：不同模型/不同 requant 存的标记不一样
+    // （Qwen 用 ASCII '|'，DeepSeek-R1 用全角 '｜'），只要它在词表里是一个整体 token，
+    // 就应当整体匹配 —— 命中时产出的 id 与 BPE 一致，不会把普通文本 token 弄错。
+    // 按长度降序排好，encode 时从左到右做最长匹配。
+    void init_special() {
+        special_.clear();
+        for (int i = 0; i < static_cast<int>(tokens_.size()); ++i) {
+            const std::string& s = tokens_[static_cast<std::size_t>(i)];
+            if (s.size() >= 4 && s.front() == '<' && s.back() == '>') {
+                special_.emplace_back(s, i);
+            }
+        }
+        std::sort(special_.begin(), special_.end(),
+                  [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
+                      return a.first.size() > b.first.size();
+                  });
+    }
+
+    bool starts_special(const std::string& text, size_t pos) const {
+        for (const auto& sp : special_) {
+            if (text.compare(pos, sp.first.size(), sp.first) == 0) return true;
+        }
+        return false;
+    }
 
     static const std::vector<std::string>& byte2uni() {
         static const std::vector<std::string> t = [] {
@@ -120,6 +163,7 @@ private:
     std::vector<std::string> tokens_;
     std::unordered_map<std::string, int> tok2id_;
     std::unordered_map<std::string, int> merge_;
+    std::vector<std::pair<std::string, int>> special_;   // <|...|>，长度降序
     mutable std::unordered_map<std::string, uint8_t> uni2byte_;
 };
 

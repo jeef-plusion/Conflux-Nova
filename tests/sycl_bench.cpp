@@ -481,10 +481,11 @@ int main(int argc, char** argv) {
     std::printf("[bench] dp4a 加速比 = 标量 %.2f us / dp4a %.2f us = %.2fx   门槛 >= 1.8x -> %s\n",
                 t_sw_n * 1e6, t_hw_n * 1e6, dp4a_ratio,
                 (dp4a_ratio >= 1.8) ? "PASS" : "FAIL");
-    std::printf("[bench] 有效带宽     = %.2f GB/s（设计带宽 %.1f 的 %.0f%%）门槛 >= 70 GB/s -> %s\n",
+    std::printf("[bench] 有效带宽     = %.2f GB/s（设计带宽 %.1f 的 %.0f%%）"
+                "回归门 >= 34 GB/s -> %s\n",
                 bw_hw, syclb::profile::kDesignBandwidthGBs,
                 100.0 * bw_hw / syclb::profile::kDesignBandwidthGBs,
-                (bw_hw >= 70.0) ? "PASS" : "FAIL");
+                (bw_hw >= 34.0) ? "PASS" : "FAIL");
     if (bw_hw > syclb::profile::kTheoreticalBandwidthGBs * 1.05) {
         std::printf("[bench] 注意: 带宽超过理论值 %.1f GB/s —— 7.2 MiB 的权重整个驻留在 L3，"
                     "这个数不是 DRAM 带宽。看下面的冷缓存测量。\n", syclb::profile::kTheoreticalBandwidthGBs);
@@ -995,6 +996,11 @@ int main(int argc, char** argv) {
 
     // -----------------------------------------------------------------------
     // 9. 门槛汇总
+    //    门槛在 2026-11-09 重定过一次（用户拍板）：原来的 70 / 1.8x / 55 都是
+    //    「以为顺序读上限是 100~136 GB/s」时定的；本机实测上限 61.38 GB/s，70 比上限还高。
+    //    现在分两层：
+    //      - 回归门（会失败）：卡在实测值的下方，用来抓性能回退；
+    //      - 目标（只打印，不判失败）：以 61.38 为基准的下一步目标。
     // -----------------------------------------------------------------------
     section("9. 门槛汇总");
     int failed = 0;
@@ -1002,9 +1008,20 @@ int main(int argc, char** argv) {
         std::printf("  [%s] %-34s 实测 %8.2f   门槛 %8.2f\n", ok ? "PASS" : "FAIL", name, got, need);
         if (!ok) ++failed;
     };
-    gate(bw_hw >= 70.0,             "GEMV 有效带宽 (GB/s)",     bw_hw, 70.0);
-    gate(dp4a_ratio >= 1.8,         "dp4a / 标量 加速比",       dp4a_ratio, 1.8);
-    gate(tps_15b >= 55.0,           "1.5B decode (tok/s)",      tps_15b, 55.0);
+    // 回归门：四次实测 36.3~38.8 GB/s，取 34（≈最差值的 94%）
+    gate(bw_hw >= 34.0,             "GEMV 有效带宽 (GB/s)",     bw_hw, 34.0);
+    // 回归门：34 GB/s 对应 37.9 tok/s，取 37
+    gate(tps_15b >= 37.0,           "1.5B decode (tok/s)",      tps_15b, 37.0);
+    // dp4a：本机探针找不到硬件 intrinsic，两条路都是标量，这条门槛在这里没有意义。
+    // 有硬件 dp4a 时才当门槛；没有时降级成 INFO（不是放水，是让它只在该成立的机器上生效）。
+    if (syclb::kDp4aHardware) {
+        gate(dp4a_ratio >= 1.8,     "dp4a / 标量 加速比",       dp4a_ratio, 1.8);
+    } else {
+        std::printf("  [INFO] dp4a / 标量 = %.2fx（本机构建是纯标量，门槛不适用；"
+                    "见 docs/SYCL_PORT.md §7.2）\n", dp4a_ratio);
+    }
+    std::printf("  [INFO] 目标（以 61.38 GB/s 顺序读上限为基准）：GEMV >= 45 GB/s、"
+                "1.5B decode >= 50 tok/s\n");
     {
         // 方案 C 不是门槛项（基线 18 GB/s 本来就过不了 70），只报 A/B 的结果
         int best = 0;   // 基线也参与"最优"比较（之前漏了它，会误报 4 段最优）
