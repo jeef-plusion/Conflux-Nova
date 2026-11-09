@@ -61,8 +61,18 @@ static_assert(kHD == 64 || kHD == 128, "head_dim 只支持 64 / 128");
 // ============================================================================
 // 1. 调参旋钮（默认值 = docs/SYCL_PORT.md §5 的推荐值；全部可在命令行覆盖）
 // ============================================================================
-#ifndef NOVA_SYCL_GEMV_ROWS       // 每个 work-group 处理几行 = 几个 subgroup
+#ifndef NOVA_SYCL_GEMV_ROWS       // 每个 work-group 里有几个 subgroup（= 8 / SPLIT 行）
 #  define NOVA_SYCL_GEMV_ROWS 8
+#endif
+#ifndef NOVA_SYCL_GEMV_SPLIT      // 每行由几个 subgroup 分段扫（1 = 旧映射）
+// 默认 1：方案 C（=4）在目标机 Arc 130T 上实测**显著更慢**，已回退。
+// 2026-11-09 实测（1.5B, SG=16, 2000 次发射 × 3 轮，同进程交替，σ<1%）：
+//   旧映射 36.07 us = 36.79 GB/s | 4 段连续 37.06 us (-2.7%) | 2 段 41.99 us (-14.1%) | 4 段交错 38.99 us (-7.5%)
+// 见 docs/PERF_BASELINE.md §8。要复现实验就 -DNOVA_SYCL_GEMV_SPLIT=4。
+#  define NOVA_SYCL_GEMV_SPLIT 1
+#endif
+#ifndef NOVA_SYCL_GEMV_STRIPE     // 1 = 4 个 subgroup 交错扫一行（段间不连续，实验臂）
+#  define NOVA_SYCL_GEMV_STRIPE 0
 #endif
 #ifndef NOVA_SYCL_RMS_WG          // RMSNorm 每行的 work-group 大小
 #  define NOVA_SYCL_RMS_WG 256
@@ -87,6 +97,9 @@ static_assert(kHD == 64 || kHD == 128, "head_dim 只支持 64 / 128");
 #endif
 
 inline constexpr int kGemvRows   = NOVA_SYCL_GEMV_ROWS;
+inline constexpr int kGemvSplits = NOVA_SYCL_GEMV_SPLIT;                       // 每行几个 subgroup（方案 C = 4）
+inline constexpr bool kGemvStripe = (NOVA_SYCL_GEMV_STRIPE != 0);              // 段间取"交错"还是"连续"
+inline constexpr int kGemvRowsPerWg = kGemvRows / kGemvSplits;                 // 一个 WG 负责几行（8/4 = 2）
 inline constexpr int kRmsWg      = NOVA_SYCL_RMS_WG;
 inline constexpr int kQuantSg    = NOVA_SYCL_QUANT_SG;
 inline constexpr int kAttnDecWg  = NOVA_SYCL_ATTN_DEC_WG;
@@ -97,6 +110,9 @@ inline constexpr bool kRopeNeox  = (NOVA_SYCL_ROPE_NEOX != 0);
 
 static_assert(kGemvRows > 0 && kGemvRows * syclb::kSyclSg <= 1024, "GEMV work-group 超 1024");
 static_assert(kGemvRows * syclb::kSyclSg <= 512, "GEMV work-group 太大会压 occupancy");
+static_assert(kGemvSplits >= 1 && kGemvSplits <= kGemvRows, "GEMV 每行分段数必须 1..GEMV_ROWS");
+static_assert((kGemvSplits & (kGemvSplits - 1)) == 0, "GEMV 每行分段数必须是 2 的幂（1/2/4/8）");
+static_assert(kGemvRows % kGemvSplits == 0, "GEMV_ROWS 必须能被每行分段数整除");
 static_assert(kRmsWg % syclb::kSyclSg == 0 && kRmsWg <= 1024, "RMSNorm WG 必须是 subgroup 的整数倍");
 static_assert(kAttnDecWg % syclb::kSyclSgAttn == 0, "decode split-K 的 WG 必须是 subgroup 的整数倍");
 static_assert(kAttnDecWg / syclb::kSyclSgAttn >= 1 && kAttnDecWg / syclb::kSyclSgAttn <= 8, "decode 每 WG 的 subgroup 数 1..8");
@@ -229,6 +245,14 @@ inline Q4KLane q4k_lane(int lane) {
 
 // 一个 subgroup 一次并行覆盖几个 super-block
 inline constexpr int kBlocksInFlight = syclb::kSyclSg / 8;
+
+// ---- 方案 C：一行的 super-block 怎么分给 SPLITS 个 subgroup -----------------
+// floor 切分：第 s 段 = [s*BPR/SPLITS, (s+1)*BPR/SPLITS)，段长最多差 1，段与段首尾相接，
+// 4 个 subgroup 合起来正好覆盖整行，不重不漏。
+//   1.5B（BPR=6, SPLITS=4）: 1/2/1/2        7B（BPR=14, SPLITS=4）: 3/4/3/4
+// 与 q4k_gemv.cpp 里 kernel 用的是同一份算术（tests/sycl_gemv_host_check.cpp 直接跑这个 kernel）。
+inline constexpr int q4k_seg_begin(int split, int splits, int bpr) { return split * bpr / splits; }
+inline constexpr int q4k_seg_end(int split, int splits, int bpr) { return (split + 1) * bpr / splits; }
 
 // ============================================================================
 // 4. 常用 launch 形状

@@ -15,6 +15,7 @@
 // 退出码 = 未通过的性能门槛数（0 = 全过）。详见 docs/SYCL_PORT.md §6。
 #include <sycl/sycl.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "nova/config.h"
@@ -47,6 +49,20 @@ double secs(Clock::time_point a, Clock::time_point b) {
     return std::chrono::duration<double>(b - a).count();
 }
 
+double median_of(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    return (n % 2 == 1) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+double stdev_of(const std::vector<double>& v, double mean) {
+    if (v.size() < 2) return 0.0;
+    double s = 0.0;
+    for (double x : v) s += (x - mean) * (x - mean);
+    return std::sqrt(s / static_cast<double>(v.size() - 1));
+}
+
 // ---------------------------------------------------------------------------
 // 参数
 // ---------------------------------------------------------------------------
@@ -56,6 +72,10 @@ struct Args {
     int  iters  = 100;
     int  warmup = 5;
     int  ctx    = 512;
+    int  ab_iters = 2000;  // 方案 C A/B 每次测量的发射次数（10 次 = 0.5 ms，根本进不了稳态）
+    int  ab_cooldown = 0;  // A/B 每轮之间冷却秒数。默认 0：冷却会让 GPU 掉到 idle 时钟，
+                           // 而一次测量只有 0.1 s，醒来那一下比稳态还慢 2 倍（实测 50 -> 100 us）
+    int  warm_ms = 2000;   // 计时前的 GPU 提频预热（毫秒）；0 = 冷态口径
     bool cold   = true;
     bool checks = true;
 };
@@ -68,6 +88,10 @@ void usage() {
         "  --iters  <n>      计时迭代数（默认 100）\n"
         "  --warmup <n>      预热迭代数（默认 5）\n"
         "  --ctx    <n>      推算 tok/s 用的上下文长度（默认 512）\n"
+        "  --ab-iters <n>    方案 C A/B 每次测量的发射次数（默认 2000 ≈ 0.1 s，进稳态）\n"
+        "  --ab-cooldown <s> A/B 每轮之间的冷却秒数（默认 0）。注意：一次测量很短时，冷却反而\n"
+        "                    会让 GPU 掉回 idle 时钟，测出来更慢（实测 6 s 冷却：50 -> 100 us）\n"
+        "  --warm-ms <n>     计时前的 GPU 提频预热毫秒（默认 2000；0 = 冷态口径）\n"
         "  --no-cold         跳过冷缓存（绕 L3）测量\n"
         "  --no-checks       跳过其它算子的数值抽检\n");
 }
@@ -84,12 +108,18 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (s == "--iters")  { const char* v = next("--iters"); if (!v) return false; a.iters = std::atoi(v); }
         else if (s == "--warmup") { const char* v = next("--warmup"); if (!v) return false; a.warmup = std::atoi(v); }
         else if (s == "--ctx")    { const char* v = next("--ctx"); if (!v) return false; a.ctx = std::atoi(v); }
+        else if (s == "--ab-iters") { const char* v = next("--ab-iters"); if (!v) return false; a.ab_iters = std::atoi(v); }
+        else if (s == "--ab-cooldown") { const char* v = next("--ab-cooldown"); if (!v) return false; a.ab_cooldown = std::atoi(v); }
+        else if (s == "--warm-ms") { const char* v = next("--warm-ms"); if (!v) return false; a.warm_ms = std::atoi(v); }
         else if (s == "--no-cold")   a.cold = false;
         else if (s == "--no-checks") a.checks = false;
         else if (s == "-h" || s == "--help") { usage(); return false; }
         else { std::printf("[bench] 未知参数: %s\n", s.c_str()); usage(); return false; }
     }
     if (a.iters < 2) a.iters = 2;
+    if (a.ab_iters < 100) a.ab_iters = 100;
+    if (a.ab_cooldown < 0) a.ab_cooldown = 0;
+    if (a.warm_ms < 0) a.warm_ms = 0;
     return true;
 }
 
@@ -334,12 +364,90 @@ int main(int argc, char** argv) {
     }
 
     // -----------------------------------------------------------------------
+    // 3b. 方案 C 的各个变体逐个对拍（先对拍，再谈速度 —— docs/SYCL_PORT.md §11.4）
+    // -----------------------------------------------------------------------
+    using GemvFn = void (*)(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+    struct GemvArm {
+        const char* name;
+        int         splits;
+        GemvFn      fn;
+    };
+    const GemvArm gemv_arms[] = {
+        {"SPLITS=1 (旧映射)",          1, &nova::syclk::gemv_variant<K, true, 1, false>},
+        {"SPLITS=2 连续段 (折中)",     2, &nova::syclk::gemv_variant<K, true, 2, false>},
+        {"SPLITS=4 连续段 (= 方案 C)", 4, &nova::syclk::gemv_variant<K, true, 4, false>},
+        {"SPLITS=4 交错段 (实验臂)",   4, &nova::syclk::gemv_variant<K, true, 4, true >},
+    };
+    constexpr int kArms = static_cast<int>(sizeof(gemv_arms) / sizeof(gemv_arms[0]));
+    const int BPR_arm = K / syclb::kQK;
+    const int SG_blocks = syclb::kSyclSg / 8;
+
+    std::printf("[bench] GEMV 配置: SG=%d  块/lane组=%d  GEMV_ROWS=%d  SPLIT=%d  STRIPE=%d  "
+                "每 WG %d 行\n",
+                syclb::kSyclSg, SG_blocks, nova::syclk::kGemvRows,
+                nova::syclk::kGemvSplits, static_cast<int>(nova::syclk::kGemvStripe),
+                nova::syclk::kGemvRowsPerWg);
+    std::printf("  %-30s %6s %5s %4s %7s %9s %11s %11s %s\n",
+                "变体", "块/行", "段长", "NP", "行/WG", "groups", "rel_l2", "max_abs", "判定");
+    for (int a = 0; a < kArms; ++a) {
+        std::vector<float> hv(static_cast<std::size_t>(rows));
+        gemv_arms[a].fn(w, act.view(), d_out, dev.q());
+        dev.sync();
+        dev.download(hv.data(), d_out, static_cast<std::uint64_t>(rows) * 4);
+        const ErrStat e = compare(hv.data(), h_ref.data(), rows);
+        const int seg = (BPR_arm + gemv_arms[a].splits - 1) / gemv_arms[a].splits;
+        std::printf("  %-30s %6d %5d %4d %7d %9d %11.3e %11.3e  %s\n",
+                    gemv_arms[a].name, BPR_arm, seg, (seg + SG_blocks - 1) / SG_blocks,
+                    nova::syclk::kGemvRows / gemv_arms[a].splits,
+                    (rows + nova::syclk::kGemvRows / gemv_arms[a].splits - 1) /
+                        (nova::syclk::kGemvRows / gemv_arms[a].splits),
+                    e.rel_l2, e.max_abs, (e.rel_l2 < 1e-4) ? "PASS" : "FAIL");
+        check_fail += (e.rel_l2 < 1e-4) ? 0 : 1;
+    }
+
+    // -----------------------------------------------------------------------
     // 4. 计时：GEMV(100 次) / 带宽 / dp4a 加速比
     // -----------------------------------------------------------------------
     section("4. GEMV 计时 / 有效带宽 / dp4a 加速比");
     const double w_bytes = static_cast<double>(w.bytes());
     auto launch_hw = [&] { nova::syclk::gemv<K, true>(w, act.view(), d_out, dev.q()); };
     auto launch_sw = [&] { nova::syclk::gemv<K, false>(w, act.view(), d_out, dev.q()); };
+
+    // -----------------------------------------------------------------------
+    // 4a. 提频曲线 + 预热（这一节是这台机器上最重要的诊断）
+    //   目标机没有散热器：冷态跑 GEMV 只有 boost 态的 60% 左右。实测同一份 kernel、
+    //   同一个二进制内：§4（刚进进程，冷态）82.50 us/次，§4c（微基准烧了 300 ms 后）
+    //   51.61 us/次 —— 差 1.6 倍，全是时钟状态，不是访存形状。
+    //   所以计时之前必须先看曲线、再烧 --warm-ms 毫秒。
+    //   --warm-ms 0 = 复现 PERF_BASELINE 那种「冷态」口径（只做 5 次 warmup）。
+    // -----------------------------------------------------------------------
+    if (args.warm_ms > 0) {
+        const int batches = 8, per = 20;
+        std::printf("[bench] 提频曲线（同一 kernel 连跑 %d 批 × %d 次）:\n", batches, per);
+        double t_first = 0.0, t_last = 0.0;
+        for (int b = 0; b < batches; ++b) {
+            const double t = avg_launch(launch_hw, per, dev.q());
+            if (b == 0) t_first = t;
+            t_last = t;
+            std::printf("        批 %d: %7.2f us/次  -> %6.2f GB/s\n", b + 1, t * 1e6, w_bytes / t / 1e9);
+        }
+        if (t_last > 1e-12) {
+            std::printf("        批%d/批1 = %+.1f%%（正 = 越跑越快 = 提频；负 = 降频）\n", batches,
+                        (t_first / t_last - 1.0) * 100.0);
+        }
+        const auto t0 = Clock::now();
+        int n = 0;
+        while (true) {
+            for (int i = 0; i < 20; ++i) launch_hw();
+            dev.sync();
+            n += 20;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count() >=
+                args.warm_ms) {
+                break;
+            }
+        }
+        std::printf("        预热烧满 %d ms / %d 次，开始计时\n", args.warm_ms, n);
+    }
 
     for (int i = 0; i < args.warmup; ++i) launch_hw();
     dev.sync();
@@ -408,6 +516,121 @@ int main(int argc, char** argv) {
     }
 
     // -----------------------------------------------------------------------
+    // 4c. 方案 C A/B：SPLITS=1 / 2 / 4 连续段 / 4 交错段
+    //     规矩（docs/PERF_BASELINE.md §5.3 + 目标机无散热器）：
+    //       - 四个臂在**同一进程、同一轮内交替**跑，热状态共享，A/B 才可比；
+    //       - 每轮之间冷却 --ab-cooldown 秒，并把每臂每轮的原始值打出来，
+    //         直接看「轮 1 vs 轮 3」是不是在降频；
+    //       - 差值 < 2σ(合并) 判不显著。
+    // -----------------------------------------------------------------------
+    section("4c. 方案 C A/B（同进程交替，每轮之间冷却看降频）");
+    double ab_gain[kArms] = {};
+    double ab_med[kArms]  = {};
+    double ab_sd[kArms]   = {};
+    {
+        const int rounds = 3;
+        std::vector<double> samples[kArms];
+        for (int a = 0; a < kArms; ++a) {
+            for (int i = 0; i < 3; ++i) gemv_arms[a].fn(w, act.view(), d_out, dev.q());
+        }
+        dev.sync();
+        for (int r = 0; r < rounds; ++r) {
+            if (r > 0 && args.ab_cooldown > 0) {
+                std::printf("  ... 冷却 %d s（让 SoC 回落，再测下一轮）\n", args.ab_cooldown);
+                std::fflush(stdout);
+                std::this_thread::sleep_for(std::chrono::seconds(args.ab_cooldown));
+            }
+            for (int a = 0; a < kArms; ++a) {
+                auto launch = [&] { gemv_arms[a].fn(w, act.view(), d_out, dev.q()); };
+                samples[a].push_back(avg_launch(launch, args.ab_iters, dev.q()));
+            }
+        }
+        std::printf("  每次测量 = %d 次发射；每臂 %d 轮，轮间冷却 %d s\n\n",
+                    args.ab_iters, rounds, args.ab_cooldown);
+
+        // 每臂每轮的原始值：这张表就是热漂移的证据
+        std::printf("  %-30s", "臂（us/次）");
+        for (int r = 0; r < rounds; ++r) std::printf(" %9s", ("轮" + std::to_string(r + 1)).c_str());
+        std::printf(" %10s %6s\n", "中位数", "σ%");
+        for (int a = 0; a < kArms; ++a) {
+            ab_med[a] = median_of(samples[a]);
+            ab_sd[a]  = stdev_of(samples[a], ab_med[a]);
+            std::printf("  %-30s", gemv_arms[a].name);
+            for (int r = 0; r < rounds; ++r) std::printf(" %9.2f", samples[a][static_cast<std::size_t>(r)] * 1e6);
+            std::printf(" %10.2f %6.1f\n", ab_med[a] * 1e6,
+                        (ab_med[a] > 1e-12) ? 100.0 * ab_sd[a] / ab_med[a] : 0.0);
+        }
+        // 降频检查：轮 3 / 轮 1（同一个臂，跨轮变化只可能来自热与后台负载）
+        std::printf("\n  降频检查（轮3/轮1，负值 = 后段更慢 = 降频）:\n");
+        double drift_worst = 0.0;
+        for (int a = 0; a < kArms; ++a) {
+            const double s1 = samples[a][0], s3 = samples[a][static_cast<std::size_t>(rounds - 1)];
+            const double d  = (s1 > 1e-12) ? (s3 / s1 - 1.0) * 100.0 : 0.0;
+            if (std::fabs(d) > std::fabs(drift_worst)) drift_worst = d;
+            std::printf("    %-30s %+6.1f%%\n", gemv_arms[a].name, d);
+        }
+        if (std::fabs(drift_worst) > 10.0) {
+            std::printf("  [WARN] 最大漂移 %.1f%% > 10%%：整机不在稳态。绝对带宽不可信，\n"
+                        "         但同一轮内的四臂是同一热状态，A/B 的差值仍然可比。\n", drift_worst);
+        } else {
+            std::printf("  漂移 %.1f%% <= 10%%：这次测量算稳态，绝对带宽可用。\n", drift_worst);
+        }
+        rule();
+
+        std::printf("  %-30s %10s %10s %10s %8s  %s\n",
+                    "臂", "中位数 us", "带宽 GB/s", "vs 基线", "σ 对比", "判定");
+        for (int a = 0; a < kArms; ++a) {
+            const double bw    = w_bytes / ab_med[a] / 1e9;
+            const double gain  = (ab_med[0] > 1e-12) ? (ab_med[0] / ab_med[a] - 1.0) * 100.0 : 0.0;
+            // 两个中位数之差的噪声：合并标准差；差值 < 2σ 判不显著（与 bench_ab 同一规则）
+            const double sd_cmp = std::sqrt(ab_sd[0] * ab_sd[0] + ab_sd[a] * ab_sd[a]);
+            const bool sig = (a == 0) ? false : (std::fabs(ab_med[0] - ab_med[a]) > 2.0 * sd_cmp);
+            ab_gain[a] = gain;
+            if (a == 0) {
+                std::printf("  %-30s %10.2f %10.2f %10s %8s  %s\n",
+                            gemv_arms[a].name, ab_med[a] * 1e6, bw, "—", "—", "基线");
+            } else {
+                std::printf("  %-30s %10.2f %10.2f %+9.1f%% %8.1f  %s\n",
+                            gemv_arms[a].name, ab_med[a] * 1e6, bw, gain, sd_cmp * 1e6,
+                            sig ? (gain > 0 ? "显著变快" : "显著变慢") : "不显著");
+            }
+        }
+        rule();
+        std::printf("  判据: 差值 < 2σ(合并) 判不显著；σ%% 是 3 轮的离散度。\n");
+        std::printf("  读法: 先看「显著变快」，再看它是否落到 26~30 GB/s（docs/SYCL_PORT.md §11.3）。\n");
+
+        // 测量时长守卫：一次测量太短就进不了稳态（这台机器上 10 次发射 = 0.5 ms，
+        // 掉到 idle 时钟后每发射 100 us，比稳态慢 2 倍，还见过 19.7 ms 的唤醒惩罚）
+        const double arm_ms = ab_med[0] * 1e3 * static_cast<double>(args.ab_iters);
+        std::printf("  每臂每次测量时长: %.1f ms（%d 次发射 × %.2f us）\n", arm_ms, args.ab_iters, ab_med[0] * 1e6);
+        if (arm_ms < 50.0) {
+            std::printf("  [WARN] 单次测量只有 %.1f ms，太短：GPU 可能还在提频/唤醒过程中，\n"
+                        "         建议 --ab-iters >= 2000（≈100 ms）。\n", arm_ms);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 4d. 热漂移复测：离开 4c 之前再测一次与 §4 完全相同的那个臂
+    //     这台机器没有散热器，「同一个 kernel 前后差多少」比任何绝对值都重要。
+    // -----------------------------------------------------------------------
+    double drift_run = 0.0;
+    {
+        section("4d. 热漂移复测（§4 的同一个臂，再测一次）");
+        if (args.ab_cooldown > 0) {
+            std::printf("  冷却 %d s 后复测\n", args.ab_cooldown);
+            std::fflush(stdout);
+            std::this_thread::sleep_for(std::chrono::seconds(args.ab_cooldown));
+        }
+        const double t_again = avg_launch(launch_hw, args.iters, dev.q());
+        drift_run = (t_hw_n > 1e-12) ? (t_again / t_hw_n - 1.0) * 100.0 : 0.0;
+        std::printf("  §4 首次 %8.2f us -> 现在 %8.2f us  漂移 %+6.1f%%（负值 = 现在更慢 = 降频）\n",
+                    t_hw_n * 1e6, t_again * 1e6, drift_run);
+        std::printf("  结论: %s\n",
+                    (std::fabs(drift_run) <= 10.0) ? "同一进程内没有明显降频，绝对值可用"
+                                                   : "整机在漂移，绝对值不可信；只比同一轮内的相对差");
+    }
+
+    // -----------------------------------------------------------------------
     // 5. 冷缓存（绕开 L3）—— 可选
     // -----------------------------------------------------------------------
     double bw_cold = 0.0;
@@ -472,15 +695,16 @@ int main(int argc, char** argv) {
                 w_bytes / (1024.0 * 1024.0), t4 * 1e6, bw4);
     std::printf("[bench] 折合单列 %.2f us（若比单列 GEMV 的 %.2f us 小，说明批量确实摊薄了权重读）\n",
                 t4 * 1e6 / 4.0, t_hw_n * 1e6);
-    // 正确性抽查：gemv4 的第 0 列用的是与单列 GEMV 完全相同的激活，两者应当逐位相同
+    // 正确性抽查：gemv4 的第 0 列用的是与单列 GEMV 完全相同的激活；
+    // gemv4 仍是「1 subgroup = 1 行」，所以要和 SPLITS=1 的变体比（同映射 = 应当逐位相同）。
     {
         std::vector<float> h0(static_cast<std::size_t>(rows)), h4(static_cast<std::size_t>(rows) * ncols4);
-        nova::syclk::gemv<K, true>(w, act.view(), d_out, dev.q());
+        nova::syclk::gemv_variant<K, true, 1, false>(w, act.view(), d_out, dev.q());
         dev.sync();
         dev.download(h0.data(), d_out, static_cast<std::uint64_t>(rows) * 4);
         dev.download(h4.data(), d_out4, static_cast<std::uint64_t>(ncols4) * rows * 4);
         const ErrStat e4 = compare_f32(h4.data(), h0.data(), rows);
-        std::printf("[bench] gemv4 第 0 列 vs 单列 gemv: rel_l2 = %.3e  max_abs = %.3e  %s\n",
+        std::printf("[bench] gemv4 第 0 列 vs 单列 gemv(SPLITS=1): rel_l2 = %.3e  max_abs = %.3e  %s\n",
                     e4.rel_l2, e4.max_abs, (e4.rel_l2 < 1e-6) ? "ok" : "FAIL");
         check_fail += (e4.rel_l2 < 1e-6) ? 0 : 1;
     }
@@ -781,6 +1005,22 @@ int main(int argc, char** argv) {
     gate(bw_hw >= 70.0,             "GEMV 有效带宽 (GB/s)",     bw_hw, 70.0);
     gate(dp4a_ratio >= 1.8,         "dp4a / 标量 加速比",       dp4a_ratio, 1.8);
     gate(tps_15b >= 55.0,           "1.5B decode (tok/s)",      tps_15b, 55.0);
+    {
+        // 方案 C 不是门槛项（基线 18 GB/s 本来就过不了 70），只报 A/B 的结果
+        int best = 1;
+        for (int a = 2; a < kArms; ++a) {
+            if (ab_med[a] < ab_med[best]) best = a;
+        }
+        std::printf("  [INFO] 方案 C A/B: 基线 %.2f us (%.2f GB/s)", ab_med[0] * 1e6, w_bytes / ab_med[0] / 1e9);
+        for (int a = 1; a < kArms; ++a) {
+            std::printf(" | %d 段%s %.2f us (%+.1f%%)", gemv_arms[a].splits,
+                        gemv_arms[a].splits == 4 && a == kArms - 1 ? "交错" : "连续",
+                        ab_med[a] * 1e6, ab_gain[a]);
+        }
+        std::printf("  -> 本机最优 %s\n", gemv_arms[best].name);
+        std::printf("  [INFO] 热漂移: §4 复测差 %+.1f%%（|差| > 10%% 时绝对值不可信，只看同一轮内的相对差）\n",
+                    drift_run);
+    }
     if (micro_ratio > 0.0) {
         std::printf("  [INFO] dp4a 指令级微基准加速比 %.2fx（不是门槛项；用于区分"
                     "「带宽受限」与「dp4a 被软件展开」）\n", micro_ratio);

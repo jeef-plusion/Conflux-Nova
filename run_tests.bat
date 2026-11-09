@@ -23,4 +23,10 @@ if errorlevel 1 exit /b 1
 build\gpu_misc.exe
 if errorlevel 1 exit /b 1
 
+echo === CPU: SYCL GEMV lane mapping (scheme C, no oneAPI needed) ===
+cl /nologo /std:c++17 /O2 /EHsc /utf-8 /wd4068 /wd5030 /Iinclude /Icode\device\sycl /Isrc\kernel\sycl /Itests\host_sycl -DNOVA_SYCL_MODEL_QWEN25_1P5B -DNOVA_SYCL_DP4A=0 -DNOVA_SYCL_SG=16 tests\sycl_gemv_host_check.cpp src\kernel\sycl\quant.cpp src\loader\gguf.cpp /Fe:build\sycl_gemv_host_check.exe
+if errorlevel 1 exit /b 1
+build\sycl_gemv_host_check.exe build\q4k_15b.gguf
+if errorlevel 1 exit /b 1
+
 echo ALL TESTS PASS

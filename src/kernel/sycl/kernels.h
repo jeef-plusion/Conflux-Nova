@@ -64,9 +64,15 @@ void rope_apply_batch(float* qv, float* kv, int n, std::int64_t pos0,
 // q4k_gemv.cpp —— decode 主路径：Q4_K 权重 x int8 激活
 //   K = 每行的列数（256 的倍数），行数由 ChunkedWeight::rows() 给出。
 //   HW = true 走硬件 dp4a（若编译期可用），false 强制标量（基准对拍用）。
+//   方案 C 的 lane 映射由 NOVA_SYCL_GEMV_SPLIT / NOVA_SYCL_GEMV_STRIPE 决定，
+//   gemv<>() 走默认值；gemv_variant<>() 强制指定，供基准里 A/B 同进程交替跑。
 // ---------------------------------------------------------------------------
 template <int K, bool HW>
 void gemv(const ChunkedWeight& w, const ActQ8View& a, float* out, sycl::queue& q);
+
+// SPLITS = 每行由几个 subgroup 分段扫（1 = 旧映射），STRIPE = 段间交错（false = 连续段，方案 C）
+template <int K, bool HW, int SPLITS, bool STRIPE>
+void gemv_variant(const ChunkedWeight& w, const ActQ8View& a, float* out, sycl::queue& q);
 
 // ---------------------------------------------------------------------------
 // q4k_gemv4.cpp —— 四列批量 GEMV：权重 16 B 只读一次，喂 4 组激活
@@ -107,6 +113,15 @@ extern template void gemv <kD,   true >(const ChunkedWeight&, const ActQ8View&, 
 extern template void gemv <kD,   false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
 extern template void gemv <kFFN, true >(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
 extern template void gemv <kFFN, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+// 方案 C 的 A/B 变体：1 = 旧映射（对照），2 = 折中，4/连续 = 方案 C，4/交错 = 实验臂
+extern template void gemv_variant<kD,   true, 1, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kD,   true, 2, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kD,   true, 4, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kD,   true, 4, true >(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kFFN, true, 1, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kFFN, true, 2, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kFFN, true, 4, false>(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
+extern template void gemv_variant<kFFN, true, 4, true >(const ChunkedWeight&, const ActQ8View&, float*, sycl::queue&);
 extern template void gemv4<kD,   true >(const ChunkedWeight&, const std::int8_t*, const float*, const std::int32_t*, float*, sycl::queue&);
 extern template void gemv4<kD,   false>(const ChunkedWeight&, const std::int8_t*, const float*, const std::int32_t*, float*, sycl::queue&);
 extern template void gemv4<kFFN, true >(const ChunkedWeight&, const std::int8_t*, const float*, const std::int32_t*, float*, sycl::queue&);
