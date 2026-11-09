@@ -209,9 +209,7 @@ Git       C:\Tools\MinGit\cmd\git.exe
 
 ---
 
-## 7.5 另一个 bug（已修）：SG=16 时 quant 是坏的
-
-`sycl_bench` §8 的 `quant` 抽检**一直在报 FAIL**，收尾时查清不是噪声：
+## 7.5 另一个 bug（已修）：SG=16 时 quant 是坏的`sycl_bench` §8 的 `quant` 抽检**一直在报 FAIL**，收尾时查清不是噪声：
 
 | 构建 | 抽检结果 |
 |---|---|
@@ -229,6 +227,29 @@ Git       C:\Tools\MinGit\cmd\git.exe
 三个生产者共用），并加 `static_assert(32 % kSyclSg == 0)`。
 CPU 垫片验证（SG=16/32 各一遍）：`quant_rows` 0 个不一致、`rmsnorm_quant` / `swiglu_quant`
 y 的 rel_l2 3.5e-08 / 5.1e-08 且 q8 全自洽。详见 `PERF_BASELINE.md` §10。
+
+---
+
+## 7.6 端到端 decode 已经跑通了（2026-11-09，`v2.4.0-alpha`）
+
+`code/model/sycl/runner.cpp` 把 28 层串起来（算子序列 = `code/graph/dense.h`），
+`tests/sycl_e2e.cpp` 是驱动，`build_sycl_e2e.bat` 是构建入口：
+
+```bat
+build_sycl_e2e.bat 1.5b
+build\sycl\sycl_e2e.exe --gguf build\q4k_15b.gguf --tokens 24
+```
+
+实测（Arc 130T / SG=16 / DP4A=0）：权重 953.8 MiB 加载 0.95 s，**decode 28.14 ms/token = 35.54 tok/s**，
+输出连贯（`你好` → `<think></think> 你好！请告诉我有什么可以帮助你的？`）。详见 `SYCL_PORT.md` §12。
+
+⚠️ **两个必须知道的坑**（都不是 kernel 问题）：
+
+1. **目标机的 `q4k_15b.gguf` 不是 Qwen2.5-1.5B**：`general.name` = `DeepSeek R1 Distill Qwen 1.5B Abliterated`，
+   词表里**没有** `<|im_start|>`，回合标记是 `<｜User｜>` / `<｜Assistant｜>`（全角 ｜）。
+   所以 `sycl_e2e` 按词表自动选模板；**不要**再写死 ChatML。
+2. **tokenizer 的特殊 token 曾经被 BPE 拆开**（`<|im_start|>` → 6 个 token），
+   模型收到的是字面文本。已修（`<` 开头 `>` 结尾的词表项整体匹配），**CUDA 路径也跟着修好了**。
 
 ---
 
