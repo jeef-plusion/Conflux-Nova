@@ -358,3 +358,77 @@ rel_l2 = 1.009e-07   max_abs = 1.789e-06   (3584 rows)
 
 `kMaxBatch` 仍是 4（`include/nova/config.h`），所以 gemv4 就是批量 decode 的终点；
 要吃到 §7.2 的 8 列收益，得先改 `kMaxBatch`，那是模型层的事，本后端不擅自改。
+
+---
+
+## 11. 下一阶段：GEMV Lane 重映射（方案 C）
+
+> 基线数字见 `docs/PERF_BASELINE.md`。本节只改 GEMV 的 lane 映射，不动 attention，
+> 也不改 §7.1 的三条既有方向；方案 C 是其中第 3 条的落地版。
+
+### 11.1 18 GB/s 和 61 GB/s 差在哪
+
+`tools/bench_ab.cpp` 的 512 MB 顺序扫描中位数是 **61.38 GB/s**。同一台机器上，
+GEMV 在 ROWS=8、SG=16 下只有 **18.27 GB/s**，约为前者的 30%。两者的指令数都不是瓶颈，
+差在**跨步访存**。
+
+现在一个 subgroup 负责一整行权重：一行 1536 字节、24 个 super-block，由 16 个 lane 分摊，
+lane 0..15 各自读 `wrow + sbi`。相邻 lane 的地址间隔是 **144 字节**——一个 Q4_K super-block
+的大小，而不是 16 字节的连续段。一个 subgroup 一次只发出 16 个分散的 16 B 片段，
+L2 的合并窗口打不满，权重流在 L2 里被拆成很多条互不相邻的请求，剩下的差距就是延迟。
+
+这与「单次访问宽度不够」无关：
+
+- Xe 的最大 load 就是 128-bit（16 B），现在每 lane 已经用满；
+- 现有代码已经是 4 深预取，`4 × 16 B = 64 B` 在飞；
+- 再加预取深度只增加寄存器压力，不改变地址不连续这件事。
+
+### 11.2 方案 C：lane 从「按行」改成「按块」
+
+把一行切成 4 段，每段 6 个 super-block，4 个 subgroup 各领一段：
+
+| | 现在 | 方案 C |
+|---|---|---|
+| 每行 subgroup 数 | 1 | 4 |
+| 每个 subgroup 的范围 | 整行 1536 字节 / 24 个 super-block | 连续 1/4 段 / 6 个 super-block |
+| 段间地址 | — | 连续 |
+| 行内归约 | subgroup 内 `sg_sum` | 4 个 subgroup 各出部分和，走 local |
+
+关键是第二行。现在 4 个 subgroup 各自去扫不同的行，行与行之间隔着整行的字节数；
+方案 C 让 4 个 subgroup 落在**同一行**的 4 个连续段上，跨 subgroup 的地址反而连续。
+一个 work-group 发出的 4 段 16 B 片段拼起来就是接近整行的连续区间，L2 合并窗口能一次吃满。
+
+代价只有一处：4 个 subgroup 的部分和要在 work-group 内合并。做法是
+`sycl::local_accessor<float, 1>` 开 4 个 float，每个 subgroup 的 `sg_sum` 结果由 lane 0 写入，
+`it.barrier(sycl::access::fence_space::local_space)` 一次，再由 subgroup 0 的 lane 0
+把 4 个部分和相加写 `out[row]`。每行多 4 次 local 写、一次 barrier、4 次 local 读，
+相对 1536 字节的权重读可以忽略。
+
+`kSyclSgCompute=16` 不变，`kSyclSgAttn=32` 也不变。方案 C 只作用于计算类 kernel。
+
+### 11.3 预期与验收
+
+| 项 | 现状 | 方案 C 目标 |
+|---|---:|---:|
+| GEMV 有效带宽 | 18.27 GB/s | **26~30 GB/s**（目标 30+） |
+| 1.5B decode（推算） | 20.36 tok/s | **25 tok/s** |
+| GEMV rel_l2 | 8.437e-08 | < 1e-4，不允许为速度牺牲 |
+| attn_decode rel_l2 | 9.714e-08 | 不变（本节不动 attention） |
+
+18 → 26~30 GB/s 是 1.4~1.6 倍。这个区间是「合并窗口打满后能回收多少」的估计，不是实测；
+落地后先看 `sycl_bench` 的 `有效带宽` 行，再看 `tok/s`，最后才看端到端。
+
+### 11.4 风险：先对拍，再谈速度
+
+lane 映射是数值正确性的地基。改错时速度可能正常，数值会直接爆：SG=16 那次 attention
+就是例子，`attn_decode` 的 `rel_l2` 从 **9.714e-08** 变成 **2.1e38**。最后靠把 attention
+钉回 32 lane 才恢复。
+
+所以方案 C 的每一步都必须先跑数值，再看带宽：
+
+1. 先只改「一个 subgroup 内 6 个 super-block 的段内映射」，归约仍留在单 subgroup 内，
+   确认 `rel_l2` 与 8.437e-08 同级；
+2. 再把 4 个 subgroup 拆开，确认 4 个部分和的合并顺序不影响结果；
+3. 最后加 `local_accessor` + barrier，跑完整 `sycl_bench`，`rel_l2 < 1e-4` 才算过。
+
+不能只看 GB/s。映射错的 kernel 往往也能跑出好看的带宽，因为它读的是错地址上的连续数据。
