@@ -1,0 +1,5 @@
+# Windows 批处理必须是 CRLF：cmd.exe 在非 UTF-8 控制台代码页下会把 LF 换行的 .bat 拆行执行
+# （症状：build_sycl.bat 被吃成 d_sycl.bat、"‘ycl’ 不是内部或外部命令"）。
+# 只约束脚本；源码/文档保持仓库默认。
+*.bat  text eol=crlf
+*.cmd  text eol=crlf

@@ -1007,8 +1007,8 @@ int main(int argc, char** argv) {
     gate(tps_15b >= 55.0,           "1.5B decode (tok/s)",      tps_15b, 55.0);
     {
         // 方案 C 不是门槛项（基线 18 GB/s 本来就过不了 70），只报 A/B 的结果
-        int best = 1;
-        for (int a = 2; a < kArms; ++a) {
+        int best = 0;   // 基线也参与"最优"比较（之前漏了它，会误报 4 段最优）
+        for (int a = 1; a < kArms; ++a) {
             if (ab_med[a] < ab_med[best]) best = a;
         }
         std::printf("  [INFO] 方案 C A/B: 基线 %.2f us (%.2f GB/s)", ab_med[0] * 1e6, w_bytes / ab_med[0] / 1e9);
