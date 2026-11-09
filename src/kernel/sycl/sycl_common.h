@@ -17,7 +17,7 @@
 #include "nova/config.h"
 #include "nova/model/matrix.h"     // ModelSpec / Qwen25_7B / Qwen25_1p5B ...
 #include "nova/quant/q4_k.h"       // block_q4_K / get_scale_min_k4 / kQK
-#include "device.h"                // profile / kSyclSg / NOVA_SYCL_DP4A
+#include "device.h"                // profile / syclb::kSyclSg / NOVA_SYCL_DP4A
 
 // ============================================================================
 // 0. 本二进制焊死哪个模型（与 CUDA 的 -DNOVA_MODEL_* 同一个意思）
@@ -95,12 +95,12 @@ inline constexpr int kPrefillTQ  = NOVA_SYCL_PREFILL_TQ;
 inline constexpr int kPrefillKC  = NOVA_SYCL_PREFILL_KC;
 inline constexpr bool kRopeNeox  = (NOVA_SYCL_ROPE_NEOX != 0);
 
-static_assert(kGemvRows > 0 && kGemvRows * kSyclSg <= 1024, "GEMV work-group 超 1024");
-static_assert(kGemvRows * kSyclSg <= 512, "GEMV work-group 太大会压 occupancy");
-static_assert(kRmsWg % kSyclSg == 0 && kRmsWg <= 1024, "RMSNorm WG 必须是 subgroup 的整数倍");
-static_assert(kAttnDecWg % kSyclSg == 0, "decode split-K 的 WG 必须是 subgroup 的整数倍");
-static_assert(kAttnDecWg / kSyclSg >= 1 && kAttnDecWg / kSyclSg <= 8, "decode 每 WG 的 subgroup 数 1..8");
-static_assert(kPrefillTQ * kSyclSg <= 1024, "prefill WG 超 1024");
+static_assert(kGemvRows > 0 && kGemvRows * syclb::kSyclSg <= 1024, "GEMV work-group 超 1024");
+static_assert(kGemvRows * syclb::kSyclSg <= 512, "GEMV work-group 太大会压 occupancy");
+static_assert(kRmsWg % syclb::kSyclSg == 0 && kRmsWg <= 1024, "RMSNorm WG 必须是 subgroup 的整数倍");
+static_assert(kAttnDecWg % syclb::kSyclSg == 0, "decode split-K 的 WG 必须是 subgroup 的整数倍");
+static_assert(kAttnDecWg / syclb::kSyclSg >= 1 && kAttnDecWg / syclb::kSyclSg <= 8, "decode 每 WG 的 subgroup 数 1..8");
+static_assert(kPrefillTQ * syclb::kSyclSg <= 1024, "prefill WG 超 1024");
 // prefill 的 KV tile 必须塞进 32 KB local
 static_assert(2 * kPrefillKC * kHD * 4 <= nova::syclb::profile::kLocalMemBytes,
               "prefill KV tile 超过 32 KiB local 上限");
@@ -228,7 +228,7 @@ inline Q4KLane q4k_lane(int lane) {
 }
 
 // 一个 subgroup 一次并行覆盖几个 super-block
-inline constexpr int kBlocksInFlight = kSyclSg / 8;
+inline constexpr int kBlocksInFlight = syclb::kSyclSg / 8;
 
 // ============================================================================
 // 4. 常用 launch 形状

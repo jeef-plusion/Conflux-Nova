@@ -19,9 +19,10 @@ public:
     QuantKernel(std::int8_t* qs, float* d, std::int32_t* s, const float* x, int total_blocks)
         : qs_(qs), d_(d), s_(s), x_(x), total_(total_blocks) {}
 
-    void operator()(sycl::nd_item<1> it) const [[sycl::reqd_sub_group_size(kSyclSg)]] {
+    [[sycl::reqd_sub_group_size(syclb::kSyclSg)]]
+    void operator()(sycl::nd_item<1> it) const {
         constexpr int NB = K / 32;
-        const int blk = static_cast<int>(it.get_global_linear_id() / kSyclSg);
+        const int blk = static_cast<int>(it.get_global_linear_id() / syclb::kSyclSg);
         if (blk >= total_) return;
 
         const sycl::sub_group sg = it.get_sub_group();
@@ -65,8 +66,8 @@ void quant_launch(ActQ8View dst, const float* x, int rows, sycl::queue& q) {
     if (total <= 0) return;
     const int groups = div_up(total, kQuantSg);
     q.parallel_for<QuantKernel<K>>(
-        sycl::nd_range<1>(sycl::range<1>(static_cast<std::size_t>(groups) * kQuantSg * kSyclSg),
-                          sycl::range<1>(kQuantSg * kSyclSg)),
+        sycl::nd_range<1>(sycl::range<1>(static_cast<std::size_t>(groups) * kQuantSg * syclb::kSyclSg),
+                          sycl::range<1>(kQuantSg * syclb::kSyclSg)),
         QuantKernel<K>(dst.qs, dst.d, dst.s, x, total));
 }
 

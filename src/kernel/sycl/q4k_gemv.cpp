@@ -35,7 +35,8 @@ public:
             float* out, int rows)
         : w_(w), xq_(xq), xd_(xd), xs_(xs), out_(out), rows_(rows) {}
 
-    void operator()(sycl::nd_item<2> it) const [[sycl::reqd_sub_group_size(kSyclSg)]] {
+    [[sycl::reqd_sub_group_size(syclb::kSyclSg)]]
+    void operator()(sycl::nd_item<2> it) const {
         constexpr int BPR = K / kQK;                                  // 每行 super-block 数
         constexpr int NP  = div_up(BPR, kBlocksInFlight);             // 每条 lane 的迭代数
         constexpr std::uint32_t kMask = 0x0F0F0F0Fu;
@@ -132,8 +133,8 @@ void gemv_launch(const ChunkedWeight& w, const ActQ8View& a, float* out, sycl::q
         const int rows   = static_cast<int>(ch.row1 - ch.row0);
         const int groups = div_up(rows, kGemvRows);
         q.parallel_for<GemvQ4K<K, HW>>(
-            sycl::nd_range<2>(sycl::range<2>(static_cast<std::size_t>(groups) * kGemvRows, kSyclSg),
-                              sycl::range<2>(kGemvRows, kSyclSg)),
+            sycl::nd_range<2>(sycl::range<2>(static_cast<std::size_t>(groups) * kGemvRows, syclb::kSyclSg),
+                              sycl::range<2>(kGemvRows, syclb::kSyclSg)),
             GemvQ4K<K, HW>(ch.ptr, a.qs, a.d, a.s, out + ch.row0, rows));
     }
 }

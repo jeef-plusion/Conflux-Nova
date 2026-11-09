@@ -23,9 +23,9 @@ inline constexpr float attn_scale_of() {
 inline constexpr float kAttnScale = attn_scale_of<kHD>();
 
 inline constexpr int kND      = kHD / 32;               // 每 lane 持几个 float
-inline constexpr int kWarpDec = kAttnDecWg / kSyclSg;   // decode 的 subgroup 数 = 4
+inline constexpr int kWarpDec = kAttnDecWg / syclb::kSyclSg;   // decode 的 subgroup 数 = 4
 inline constexpr int kSd      = kHD + 2;                // partial 行宽：m, l, HD
-inline constexpr int kPreWG   = kPrefillTQ * kSyclSg;
+inline constexpr int kPreWG   = kPrefillTQ * syclb::kSyclSg;
 inline constexpr int kKvTile  = kPrefillKC * kHD;       // K 与 V 各自的 tile 元素数
 
 } // namespace
@@ -54,10 +54,10 @@ void attn_decode(const float* qv, const float* kc, const float* vc, float* o,
         h.parallel_for<FaSplitKernel>(
             sycl::nd_range<1>(sycl::range<1>(static_cast<std::size_t>(kNH) * nsplit * kAttnDecWg),
                               sycl::range<1>(kAttnDecWg)),
-            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSyclSg)]] {
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(syclb::kSyclSg)]] {
                 const int tid  = static_cast<int>(it.get_local_id(0));
-                const int sgid = tid / kSyclSg;
-                const int lane = tid % kSyclSg;
+                const int sgid = tid / syclb::kSyclSg;
+                const int lane = tid % syclb::kSyclSg;
                 const int gid  = static_cast<int>(it.get_group(0));
                 const int head = gid / nsplit;
                 const int spi  = gid - head * nsplit;
@@ -76,7 +76,7 @@ void attn_decode(const float* qv, const float* kc, const float* vc, float* o,
                 float m = -INFINITY;
                 float l = 0.f;
                 float acc[kND] = {};
-                const float* qh = sq;
+                const float* qh = &sq[0];
 
                 for (int p = kv0; p < kv1; ++p) {
                     const float* kp = kc + (static_cast<std::int64_t>(p) * kNKV + kvh) * kHD;
@@ -174,10 +174,10 @@ void attn_prefill(const float* qv, const float* kc, const float* vc, float* o,
         h.parallel_for<FaPrefillKernel>(
             sycl::nd_range<1>(sycl::range<1>(static_cast<std::size_t>(kNH) * n_tiles * kPreWG),
                               sycl::range<1>(kPreWG)),
-            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSyclSg)]] {
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(syclb::kSyclSg)]] {
                 const int tid  = static_cast<int>(it.get_local_id(0));
-                const int sgid = tid / kSyclSg;
-                const int lane = tid % kSyclSg;
+                const int sgid = tid / syclb::kSyclSg;
+                const int lane = tid % syclb::kSyclSg;
                 const sycl::sub_group sg = it.get_sub_group();
 
                 const int gid  = static_cast<int>(it.get_group(0));

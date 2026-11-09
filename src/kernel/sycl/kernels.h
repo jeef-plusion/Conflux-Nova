@@ -81,7 +81,7 @@ void gemv4(const ChunkedWeight& w, const std::int8_t* xq4, const float* xd4, con
 // attn.cpp
 // ---------------------------------------------------------------------------
 // n_past 的语义与 CUDA 版一致：KV 里已有 n_past+1 个位置（含当前 token）。
-void attn_decode(const float* q, const float* kc, const float* vc, float* o,
+void attn_decode(const float* qv, const float* kc, const float* vc, float* o,
                  int n_past, float* scratch, sycl::queue& q);
 
 // dp4a 指令级微基准：纯寄存器循环，8 条 dp4a/迭代（标量版同样的 32 个乘加）。
@@ -93,7 +93,7 @@ constexpr int attn_decode_scratch_floats() {
     return kNH * kAttnSplit * (kHD + 2);
 }
 
-void attn_prefill(const float* q, const float* kc, const float* vc, float* o,
+void attn_prefill(const float* qv, const float* kc, const float* vc, float* o,
                   int n_q, int n_past, sycl::queue& q);
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ namespace nova {
 namespace syclk {
 namespace {
 
-inline constexpr int kSgPerWg = kRmsWg / kSyclSg;
+inline constexpr int kSgPerWg = kRmsWg / syclb::kSyclSg;
 
 // --------------------------------------------------------------------------
 // embed：一个 work-group 吃一个 token，256 个 work-item 正好覆盖一个 super-block
@@ -116,14 +116,15 @@ public:
                       const float* gate, const float* up, int rows)
         : qs_(qs), d_(d), s_(s), y_(y), gate_(gate), up_(up), rows_(rows) {}
 
-    void operator()(sycl::nd_item<1> it) const [[sycl::reqd_sub_group_size(kSyclSg)]] {
+    [[sycl::reqd_sub_group_size(syclb::kSyclSg)]]
+    void operator()(sycl::nd_item<1> it) const {
         constexpr int NB = K / 32;
         const int row = static_cast<int>(it.get_group(0));
         if (row >= rows_) return;
         const int tid = static_cast<int>(it.get_local_id(0));
         const sycl::sub_group sg = it.get_sub_group();
         const int lane = static_cast<int>(sg.get_local_linear_id());
-        const int sgid = tid / kSyclSg;
+        const int sgid = tid / syclb::kSyclSg;
 
         const std::int64_t base = static_cast<std::int64_t>(row) * K;
         for (int b = sgid; b < NB; b += kSgPerWg) {

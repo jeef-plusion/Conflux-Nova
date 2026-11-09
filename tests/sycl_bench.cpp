@@ -120,9 +120,9 @@ struct ActBuf {
 ActBuf alloc_act(Device& dev, int rows, int K, const char* what) {
     ActBuf b;
     b.rows = rows;
-    b.qs = static_cast<std::int8_t*>(dev.alloc(syb::act_q8_bytes(rows, K), MemTag::Act, what));
-    b.d  = static_cast<float*>(dev.alloc(syb::act_d_bytes(rows, K), MemTag::Act, what));
-    b.s  = static_cast<std::int32_t*>(dev.alloc(syb::act_s_bytes(rows, K), MemTag::Act, what));
+    b.qs = static_cast<std::int8_t*>(dev.alloc(syclb::act_q8_bytes(rows, K), MemTag::Act, what));
+    b.d  = static_cast<float*>(dev.alloc(syclb::act_d_bytes(rows, K), MemTag::Act, what));
+    b.s  = static_cast<std::int32_t*>(dev.alloc(syclb::act_s_bytes(rows, K), MemTag::Act, what));
     return b;
 }
 
@@ -205,9 +205,9 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, args)) return 2;
 
     std::printf("nova_v2 SYCL 后端基准 / model=%s (K=%d, NH=%d, NKV=%d, HD=%d, FFN=%d, V=%d, L=%d)\n",
-                nova::syclk::kSyclModelName, nova::syclk::kD, nova::syclk::kNH, nova::syclk::kNKV,
+                kSyclModelName, nova::syclk::kD, nova::syclk::kNH, nova::syclk::kNKV,
                 nova::syclk::kHD, nova::syclk::kFFN, nova::syclk::kV, nova::syclk::kL);
-    syb::Device::print_banner();
+    syclb::Device::print_banner();
 
     // -----------------------------------------------------------------------
     // 0. 设备
@@ -215,11 +215,11 @@ int main(int argc, char** argv) {
     section("0. 设备");
     Device dev;
     std::printf("%s", dev.caps().report().c_str());
-    if (!syb::kDp4aHardware) {
+    if (!syclb::kDp4aHardware) {
         std::printf("\n[WARN] 本次构建的 dp4a 路径 = %s\n"
                     "       这不是硬件 dp4a。build_sycl.bat 的探针没找到 sycl::dp4a 的两个候选写法，\n"
                     "       第 4 项（dp4a 加速比）必然 ≈ 1.0。见 docs/SYCL_PORT.md §7.2。\n",
-                    syb::dp4a_mode_name(syb::kNovaDp4aMode));
+                    syclb::dp4a_mode_name(syclb::kNovaDp4aMode));
     }
 
     // -----------------------------------------------------------------------
@@ -250,7 +250,7 @@ int main(int argc, char** argv) {
                     cols, nova::syclk::kD);
         return 2;
     }
-    if (ti->bytes != static_cast<std::uint64_t>(rows) * syb::q4k_row_bytes(cols)) {
+    if (ti->bytes != static_cast<std::uint64_t>(rows) * syclb::q4k_row_bytes(cols)) {
         std::printf("[bench] FATAL: 字节数与 rows*row_bytes 不符。\n");
         return 2;
     }
@@ -276,11 +276,11 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     section("2. 权重 / 激活");
     ChunkedWeight w;
-    w.create(dev, rows, syb::q4k_row_bytes(cols), "bench.attn_q");
+    w.create(dev, rows, syclb::q4k_row_bytes(cols), "bench.attn_q");
     w.upload(dev, host_w.data());
     std::printf("[bench] 权重分块: %d 块, 共 %.2f MiB（每块 ≤ %.0f MiB）\n", w.n_chunks(),
                 static_cast<double>(w.bytes()) / (1024.0 * 1024.0),
-                static_cast<double>(syb::profile::kMaxChunkBytes) / (1024.0 * 1024.0));
+                static_cast<double>(syclb::profile::kMaxChunkBytes) / (1024.0 * 1024.0));
 
     constexpr int K = nova::syclk::kD;
     const int nb_d = K / 32;
@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
     const double bw_hw_k = (kern_hw > 1e-9) ? w_bytes / kern_hw / 1e9 : 0.0;
     const double bw_sw   = w_bytes / t_sw_n  / 1e9;
 
-    std::printf("[bench] dp4a 路径      : %s\n", syb::dp4a_mode_name(syb::kNovaDp4aMode));
+    std::printf("[bench] dp4a 路径      : %s\n", syclb::dp4a_mode_name(syclb::kNovaDp4aMode));
     std::printf("[bench] 权重字节      : %.3f MiB\n", w_bytes / (1024.0 * 1024.0));
     rule();
     std::printf("  HW=true  (dp4a)   %8d 次: 平均 %8.2f us/次  ->  %6.2f GB/s\n",
@@ -374,12 +374,12 @@ int main(int argc, char** argv) {
                 t_sw_n * 1e6, t_hw_n * 1e6, dp4a_ratio,
                 (dp4a_ratio >= 1.8) ? "PASS" : "FAIL");
     std::printf("[bench] 有效带宽     = %.2f GB/s（设计带宽 %.1f 的 %.0f%%）门槛 >= 70 GB/s -> %s\n",
-                bw_hw, syb::profile::kDesignBandwidthGBs,
-                100.0 * bw_hw / syb::profile::kDesignBandwidthGBs,
+                bw_hw, syclb::profile::kDesignBandwidthGBs,
+                100.0 * bw_hw / syclb::profile::kDesignBandwidthGBs,
                 (bw_hw >= 70.0) ? "PASS" : "FAIL");
-    if (bw_hw > syb::profile::kTheoreticalBandwidthGBs * 1.05) {
+    if (bw_hw > syclb::profile::kTheoreticalBandwidthGBs * 1.05) {
         std::printf("[bench] 注意: 带宽超过理论值 %.1f GB/s —— 7.2 MiB 的权重整个驻留在 L3，"
-                    "这个数不是 DRAM 带宽。看下面的冷缓存测量。\n", syb::profile::kTheoreticalBandwidthGBs);
+                    "这个数不是 DRAM 带宽。看下面的冷缓存测量。\n", syclb::profile::kTheoreticalBandwidthGBs);
     }
 
     // -----------------------------------------------------------------------
@@ -657,9 +657,9 @@ int main(int argc, char** argv) {
                         bad_q, bad_s, max_ds, (bad_q == 0 && bad_s == 0) ? "ok" : "FAIL");
             check_fail += (bad_q == 0 && bad_s == 0) ? 0 : 1;
             dev.release(dxq, MemTag::Io, static_cast<std::uint64_t>(R) * K * 4);
-            dev.release(a.qs, MemTag::Act, syb::act_q8_bytes(R, K));
-            dev.release(a.d, MemTag::Act, syb::act_d_bytes(R, K));
-            dev.release(a.s, MemTag::Act, syb::act_s_bytes(R, K));
+            dev.release(a.qs, MemTag::Act, syclb::act_q8_bytes(R, K));
+            dev.release(a.d, MemTag::Act, syclb::act_d_bytes(R, K));
+            dev.release(a.s, MemTag::Act, syclb::act_s_bytes(R, K));
         }
         // 8.4 attention：decode 与 prefill 各一次
         {

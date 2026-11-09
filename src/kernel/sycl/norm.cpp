@@ -12,7 +12,7 @@ namespace nova {
 namespace syclk {
 namespace {
 
-inline constexpr int kNSG = kRmsWg / kSyclSg;
+inline constexpr int kNSG = kRmsWg / syclb::kSyclSg;
 
 } // namespace
 
@@ -28,7 +28,7 @@ void rms_norm(float* y, const float* x, const float* w, int rows, sycl::queue& q
         h.parallel_for<RmsNormKernel>(
             sycl::nd_range<1>(sycl::range<1>(static_cast<std::size_t>(rows) * kRmsWg),
                               sycl::range<1>(kRmsWg)),
-            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSyclSg)]] {
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(syclb::kSyclSg)]] {
                 const int row = static_cast<int>(it.get_group(0));
                 const int tid = static_cast<int>(it.get_local_id(0));
                 const sycl::sub_group sg = it.get_sub_group();
@@ -38,7 +38,7 @@ void rms_norm(float* y, const float* x, const float* w, int rows, sycl::queue& q
                 float ss = 0.f;
                 for (int i = tid; i < K; i += kRmsWg) ss = sycl::fma(xr[i], xr[i], ss);
                 const float part = sg_sum<float>(sg, ss);
-                if (tid % kSyclSg == 0) sred[tid / kSyclSg] = part;
+                if (tid % syclb::kSyclSg == 0) sred[tid / syclb::kSyclSg] = part;
                 it.barrier(sycl::access::fence_space::local_space);
 
                 float total = 0.f;
@@ -60,12 +60,12 @@ void rmsnorm_quant(float* y, ActQ8View dst, const float* x, const float* w, int 
         h.parallel_for<RmsNormQuantKernel>(
             sycl::nd_range<1>(sycl::range<1>(static_cast<std::size_t>(rows) * kRmsWg),
                               sycl::range<1>(kRmsWg)),
-            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSyclSg)]] {
+            [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(syclb::kSyclSg)]] {
                 const int row  = static_cast<int>(it.get_group(0));
                 const int tid  = static_cast<int>(it.get_local_id(0));
                 const sycl::sub_group sg = it.get_sub_group();
                 const int lane = static_cast<int>(sg.get_local_linear_id());
-                const int sgid = tid / kSyclSg;
+                const int sgid = tid / syclb::kSyclSg;
 
                 const float* xr = x + static_cast<std::int64_t>(row) * K;
                 float*       yr = y + static_cast<std::int64_t>(row) * K;

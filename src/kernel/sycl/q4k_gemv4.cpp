@@ -30,7 +30,8 @@ public:
              float* out, int out_stride, int rows)
         : w_(w), xq4_(xq4), xd4_(xd4), xs4_(xs4), out_(out), out_stride_(out_stride), rows_(rows) {}
 
-    void operator()(sycl::nd_item<2> it) const [[sycl::reqd_sub_group_size(kSyclSg)]] {
+    [[sycl::reqd_sub_group_size(syclb::kSyclSg)]]
+    void operator()(sycl::nd_item<2> it) const {
         constexpr int BPR = K / kQK;
         constexpr int NP  = div_up(BPR, kBlocksInFlight);
         constexpr std::uint32_t kMask = 0x0F0F0F0Fu;
@@ -144,8 +145,8 @@ void gemv4_launch(const ChunkedWeight& w, const std::int8_t* xq4, const float* x
         const int rows   = static_cast<int>(ch.row1 - ch.row0);
         const int groups = div_up(rows, kGemvRows);
         q.parallel_for<Gemv4Q4K<K, HW>>(
-            sycl::nd_range<2>(sycl::range<2>(static_cast<std::size_t>(groups) * kGemvRows, kSyclSg),
-                              sycl::range<2>(kGemvRows, kSyclSg)),
+            sycl::nd_range<2>(sycl::range<2>(static_cast<std::size_t>(groups) * kGemvRows, syclb::kSyclSg),
+                              sycl::range<2>(kGemvRows, syclb::kSyclSg)),
             Gemv4Q4K<K, HW>(ch.ptr, xq4, xd4, xs4, out4 + ch.row0,
                             static_cast<int>(stride), rows));
     }
