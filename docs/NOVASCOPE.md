@@ -366,3 +366,82 @@ CUDA   配额         约 2 GiB 就被挡住（见 §7.5 / §8.1）
 **唯一还剩的真路是层并行多进程**：3 个进程各持 9 层（每层 ~160 MB，都在预算内），
 激活（3584 float = 14 KB）经**主机内存**中转（IPC 不可用，但 14 KB 的往返代价可忽略）。
 这是工程活，不是 hack。
+---
+
+## 10. 关键复查：2 GiB 不是碎片，也不是我们的代码（2026-11-10 17:55）
+
+用户提出的反驳非常关键：如果 WDDM 真锁 2 GiB，llama.cpp 怎么能在同一台机器上把 1080 Ti
+塞到只剩 5%？这一节是实测。
+
+### 10.1 llama.cpp 在这台机器上**也失败**（同一堵墙）
+
+```
+D:\Desktop\ai\llama-b9631-bin-win-cuda-12.4-x64\llama-cli.exe -m build\q4k.gguf -ngl 99
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 3794.07 MiB on device 0:
+    cudaMalloc failed: out of memory
+llama_model_load: error loading model: unable to allocate CUDA0 buffer
+```
+
+llama.cpp 用最朴素的一次性 `cudaMalloc`，要 3.7 GiB，**和我们一样 OOM**。
+所以这不是 arena 分块、不是 NovaScope 的 Event 碎片、不是我们的任何代码。
+
+### 10.2 也不是碎片：单次上限 == 累计上限
+
+新增 `tools/arena_ceiling.cu`：全新进程、什么都不做，二分找"单次最大"和"256 MiB 分块的累计最大"。
+
+```
+cudaMemGetInfo: free 9.08 / total 11.00 GiB
+MAXSINGLE: 2.25 GiB
+MAXTOTAL : 2.25 GiB in 9 x 256 MiB chunks
+```
+
+**两者完全相等**。如果是碎片或"分配次数"问题，累计值应该明显高于单次值。相等只说明一件事：
+当前进程能拿到的总量就是 2.25 GiB，而 `cudaMemGetInfo` 仍报 9.08 GiB 空闲。
+
+### 10.3 这个上限是**动态**的，而且在缩水
+
+| 时间 | 观察 |
+|---|---|
+| 16:47 | 单次 **4 GiB 成功**（oom_sweep `[A]`），1.5B（1.45 GiB）正常加载 |
+| 17:40 | D3D12 POC 触发两次 `DXGI_ERROR_DEVICE_REMOVED`（驱动重置） |
+| 17:55 | 单次上限掉到 **2.25 GiB**；3.5 GiB 的单次申请也失败 |
+
+嫌疑排序（按我的判断）：
+
+1. **我们自己的 D3D12 POC**：那两次设备移除就是驱动重置，之后上限从 ≥4 GiB 掉到 2.25 GiB。
+   这条我认账 —— 不该为了验证"能不能偷显存"反复触发 TDR，即使每次只差一点。
+2. **ToDesk**：3 个进程在跑（屏幕捕获会建 D3D 资源），会话是 `console`。
+3. 驱动/会话的其他状态。
+
+### 10.4 怎么复验（需要你做，我不敢动你的远程连接）
+
+```bat
+:: 1) 重启机器（让驱动状态复位）
+:: 2) 停掉 ToDesk 服务后再跑（不要在我这边杀，怕断你的连接）
+build\lt\arena_ceiling.exe
+```
+
+判读：
+
+- 若 `MAXSINGLE >= 4.5 GiB` → **2 GiB 限制是环境态，不是硬锁**，7B 立刻能跑；
+  此时 arena 已经改成"先一次性要一大块"，直接 `build_cuda_scope.bat NOVA_MODEL_QWEN25_7B`
+  再 `set NOVA_SCOPE=1 & build\cuda_scope.exe build\q4k.gguf 8`。
+- 若仍是 ~2.25 GiB，且停 ToDesk 后上升 → ToDesk 的诅咒坐实。
+- 若重启后仍是 ~2.25 GiB → 这张卡在该驱动（581.57）/该会话下就是给不了更多。
+
+### 10.5 arena 已按 llama.cpp 式改造
+
+`DeviceArena::init()` 现在**先一次性 cudaMalloc 整个预算**，失败才退回 512 MiB 分块。
+1.5B 实测走的是前者：
+
+```
+[arena] 一次性拿到 1452.5 MiB 连续块（llama.cpp 式预分配）
+[nova] 生成 5 token: 9.21 ms/token -> 108.63 tok/s
+```
+
+7B 现在是：
+
+```
+[arena] 一次性 5174.3 MiB 失败，退回分块（每块 512 MiB）
+[arena] cudaMalloc 512.0 MiB 失败（1/5）… 5 次后放弃
+```

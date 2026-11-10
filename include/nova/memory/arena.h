@@ -67,6 +67,30 @@ public:
         budget_ = bytes;
         total_alloc_ = 0;
         total_used_ = 0;
+
+        // llama.cpp 式：先一次性要一大块。2026-11-10 实测本机"单次上限 == 累计上限"
+        // （arena_ceiling.exe：两者都是 2.25 GiB），说明不存在碎片问题，那就没必要
+        // 一开始就切成小块 —— 一块到手后，内部的 bump 分配比多次 cudaMalloc 更省驱动开销。
+        Chunk one{};
+        one.size = bytes;
+        one.kind = Kind::Device;
+        void* big = nullptr;
+        if (cudaMalloc(&big, bytes) == cudaSuccess && big != nullptr) {
+            one.base = static_cast<char*>(big);
+            one.used = 0;
+            chunks_.push_back(one);
+            total_alloc_ = bytes;
+            if (verbose_) {
+                std::printf("[arena] 一次性拿到 %.1f MiB 连续块（llama.cpp 式预分配）\n",
+                            (double)bytes / 1048576.0);
+            }
+            return;
+        }
+        cudaGetLastError();
+        if (verbose_) {
+            std::printf("[arena] 一次性 %.1f MiB 失败，退回分块（每块 %.0f MiB）\n",
+                        (double)bytes / 1048576.0, (double)kChunkBytes / 1048576.0);
+        }
     }
 
     void* alloc(std::size_t bytes, std::size_t align = 256) {
