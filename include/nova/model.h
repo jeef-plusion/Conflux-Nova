@@ -54,6 +54,10 @@ struct Profiler {
     }
 
     void end() {
+        // 防弹衣：每个算子结束时都把"最近一次 CUDA 错误"翻出来。
+        // 之前 TDR / 0x12（空指针）就是因为 kernel 已经失败、进程还继续跑，
+        // 拿着没写过的缓冲去采样，驱动最终重置。这里让错误在算子边界立刻中止。
+        NOVA_CU(cudaGetLastError());
         if (scoped) {
             if (cur < 0) return;
             if (a_ && b_) {

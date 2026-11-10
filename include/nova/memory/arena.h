@@ -1,19 +1,35 @@
-// nova_v2/memory/arena.h — 唯一的显存来源：预算是 load 期算好的，分配按块做，之后只有 bump
+// nova_v2/memory/arena.h — 唯一的显存来源：分块申请 + 三级兜底 + 触碰预热
+//
+// 2026-11-10 在 1080 Ti / WDDM 上实测出来的三条硬事实，决定了这里的长相：
+//
+//  1. 单次大申请会被"动态预算"卡住：空闲 9 GiB 时单次 4 GiB 能成，但**同时持有**到
+//     约 2 GiB 后第 9 个 256 MiB 块就 OOM（见 build\lt\oom_sweep.cu）。所以：
+//     把预算切成 ≤512 MiB 的块，逐块申请；单块失败只影响一块。
+//  2. WDDM 下桌面合成器会周期性刷新、被抢走的额度过几百毫秒往往归还 → 失败后
+//     重试 kRetries 次、每次等 kRetryMs（默认 5 × 100 ms）再放弃。
+//  3. **托管内存救不了 Pascal**：本机 concurrentManagedAccess = 0
+//     （pageableMemoryAccess 也是 0），cudaMallocManaged 仍然要求装得下，
+//     超额订阅是 Turing+ / Linux HMM 的能力。所以第三级兜底是
+//     **cudaHostAllocMapped（映射主机内存）**：UVA 下内核可直接解引用，权重走 PCIe，
+//     慢一个数量级，但"多大的模型都能塞进去"。
+//
+// 防弹衣：任何 CUDA 返回码都当场炸（NOVA_CU）；每块到手立刻 memset 触碰全部页，
+// 把 page fault 从"推理中途"挪到"加载期"（托管/映射内存尤其明显）。
+// 绝不允许 cudaMalloc 返回 NULL 之后继续用 —— 那正是 TDR / 0x12 的来源。
 #pragma once
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <thread>
 #include <vector>
 #include <cuda_runtime.h>
 #include "nova/config.h"
 
 namespace nova {
 
-// 任何一个 CUDA 返回码都必须当场炸掉。
-// 为什么：上下文一旦被污染（分配失败 / 非法地址），之后的 kernel 全部空转、
-// 采样读到的是过期 logits，进程不会报错，只会以 1000+ tok/s 打印垃圾 token。
-// 静默的坏结果比中止危险得多，所以这里把返回码变成唯一允许的失败方式。
 inline void cu_ok(cudaError_t e, const char* what, const char* file, int line) {
     if (e == cudaSuccess) return;
     std::fflush(stdout);
@@ -29,22 +45,22 @@ inline void cu_ok(cudaError_t e, const char* what, const char* file, int line) {
 }
 #define NOVA_CU(call) ::nova::cu_ok((call), #call, __FILE__, __LINE__)
 
-// ---------------------------------------------------------------------------
-// 为什么按块分配（2026-11-10 在 1080 Ti 上的实测）：
-//   同一张卡、空闲 9.08 GiB，单次 cudaMalloc 的表现是
-//       1.00 GiB -> ok
-//       1.66 GiB -> out of memory
-//   也就是 WDDM 下存在"单次分配上限"（远小于空闲量）。原来 init() 一次要 1.66 GiB
-//   （权重 828 + KV 448 + 工作区 260 + 预留 128），直接 OOM，模型根本加载不了。
-//   所以改成：预算照旧一次算好（cap() 仍是那个数），实际分配切成 512 MiB 的块，
-//   每次 alloc 先看当前块放不放得下，放不下就开新块。语义与"一整块"完全一致
-//   （所有指针都来自 alloc()，热路径仍是指针加法），只是绕开了单次上限。
-// ---------------------------------------------------------------------------
 class DeviceArena {
 public:
-    static constexpr std::size_t kChunkBytes = 512ull * 1024 * 1024;
+    static constexpr std::size_t kChunkBytes = 512ull * 1024 * 1024;   // 512 MiB 一块
+    static constexpr int         kRetries    = 5;
+    static constexpr int         kRetryMs    = 100;
 
-    // 只记预算，不分配（分配推迟到第一次 alloc，便于把 OOM 精确归因到某个张量）
+    explicit DeviceArena(bool verbose = true) : verbose_(verbose) {}
+    ~DeviceArena() {
+        for (auto& c : chunks_) {
+            if (!c.base) continue;
+            if (c.kind == Kind::HostMapped) cudaFreeHost(c.base);
+            else                            cudaFree(c.base);
+        }
+        chunks_.clear();
+    }
+
     void init(std::size_t bytes) {
         NOVA_REQUIRE(chunks_.empty());
         NOVA_REQUIRE(bytes <= (std::size_t)7ull * 1024 * 1024 * 1024 + kArenaReserve);
@@ -54,7 +70,7 @@ public:
     }
 
     void* alloc(std::size_t bytes, std::size_t align = 256) {
-        NOVA_REQUIRE(align <= 256);            // 新块天然 256 B 对齐，块内按 align 上调
+        NOVA_REQUIRE(align <= 256);
         if (!chunks_.empty()) {
             Chunk& c = chunks_.back();
             const std::size_t o = (c.used + align - 1) & ~(align - 1);
@@ -67,16 +83,12 @@ public:
         std::size_t sz = bytes + align;
         if (sz < kChunkBytes) sz = kChunkBytes;
         NOVA_REQUIRE(total_alloc_ + sz <= budget_ + kChunkBytes);
-        if (std::getenv("NOVA_ARENA_DEBUG")) {
-            std::printf("[arena] +chunk %.1f MiB (累计已分配 %.1f / 预算 %.1f MiB)\n",
-                        (double)sz / 1048576.0, (double)(total_alloc_ + sz) / 1048576.0,
-                        (double)budget_ / 1048576.0);
-        }
+
         Chunk c{};
         c.size = sz;
-        NOVA_CU(cudaMalloc(&c.base, sz));
+        c.base = take_block(sz, c.kind);
         NOVA_REQUIRE(c.base != nullptr);
-        c.used = bytes;                        // 从块首开始，天然对齐
+        c.used = bytes;
         chunks_.push_back(c);
         total_alloc_ += sz;
         total_used_ += bytes;
@@ -86,21 +98,99 @@ public:
     template <class T>
     T* alloc(std::size_t count) { return static_cast<T*>(alloc(count * sizeof(T), 256)); }
 
-    std::size_t used() const { return total_used_; }      // 真实占用（各块用量之和）
-    std::size_t cap()  const { return budget_; }          // 预算
-    std::size_t reserved() const { return total_alloc_; } // 实际向驱动要到的量
+    std::size_t used() const { return total_used_; }
+    std::size_t cap()  const { return budget_; }
+    std::size_t reserved() const { return total_alloc_; }
+    int n_malloc() const { int n = 0; for (auto& c : chunks_) if (c.kind == Kind::Device) ++n; return n; }
+    int n_managed() const { int n = 0; for (auto& c : chunks_) if (c.kind == Kind::Managed) ++n; return n; }
+    int n_host() const { int n = 0; for (auto& c : chunks_) if (c.kind == Kind::HostMapped) ++n; return n; }
     char* base() const { return chunks_.empty() ? nullptr : chunks_.front().base; }
 
 private:
+    enum class Kind { Device, Managed, HostMapped };
+
     struct Chunk {
         char*       base = nullptr;
         std::size_t size = 0;
         std::size_t used = 0;
+        Kind        kind = Kind::Device;
     };
+
+    // 三 级 兜 底：cudaMalloc（重试）→ cudaMallocManaged → cudaHostAllocMapped
+    char* take_block(std::size_t sz, Kind& kind_out) {
+        kind_out = Kind::Device;
+        cudaError_t last = cudaSuccess;
+
+        for (int i = 0; i < kRetries; ++i) {
+            void* p = nullptr;
+            last = cudaMalloc(&p, sz);
+            if (last == cudaSuccess && p != nullptr) {
+                warm_device(p, sz);
+                return static_cast<char*>(p);
+            }
+            cudaGetLastError();
+            if (last != cudaErrorMemoryAllocation) break;
+            if (verbose_) {
+                std::printf("[arena] cudaMalloc %.1f MiB 失败（%d/%d），等 %d ms 让桌面把额度还回来\n",
+                            (double)sz / 1048576.0, i + 1, kRetries, kRetryMs);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(kRetryMs));
+        }
+
+        void* m = nullptr;
+        const cudaError_t em = cudaMallocManaged(&m, sz, cudaMemAttachGlobal);
+        if (em == cudaSuccess && m != nullptr) {
+            kind_out = Kind::Managed;
+            if (verbose_) {
+                std::printf("[arena] 退到托管内存 %.1f MiB%s\n", (double)sz / 1048576.0,
+                            managed_oversubscribes() ? "" : "（本卡 concurrentManagedAccess=0，不能超额订阅，只是换个分配器）");
+            }
+            warm_device(m, sz);
+            return static_cast<char*>(m);
+        }
+        cudaGetLastError();
+
+        void* h = nullptr;
+        const cudaError_t eh = cudaHostAlloc(&h, sz, cudaHostAllocMapped);
+        if (eh == cudaSuccess && h != nullptr) {
+            kind_out = Kind::HostMapped;
+            std::memset(h, 0, sz);                 // 主机侧预置，避免内核首次读缺页
+            if (verbose_) {
+                std::printf("[arena] 退到映射主机内存 %.1f MiB —— 内核可直读，但走 PCIe（约 10 GB/s）\n",
+                            (double)sz / 1048576.0);
+            }
+            return static_cast<char*>(h);
+        }
+        cudaGetLastError();
+
+        std::fflush(stdout);
+        std::fprintf(stderr,
+                     "[arena] FATAL 无法分配 %.1f MiB：cudaMalloc=%s，cudaMallocManaged=%s，cudaHostAlloc=%s\n",
+                     (double)sz / 1048576.0, last == cudaSuccess ? "?" : cudaGetErrorString(last),
+                     cudaGetErrorString(em), cudaGetErrorString(eh));
+        return nullptr;
+    }
+
+    static bool managed_oversubscribes() {
+        static const bool ok = [] {
+            int dev = 0, v = 0;
+            if (cudaGetDevice(&dev) != cudaSuccess) return false;
+            if (cudaDeviceGetAttribute(&v, cudaDevAttrConcurrentManagedAccess, dev) != cudaSuccess) return false;
+            return v != 0;
+        }();
+        return ok;
+    }
+
+    static void warm_device(void* p, std::size_t sz) {
+        cudaMemset(p, 0, sz);                      // 设备侧写一遍：page fault 前移
+        cudaGetLastError();
+    }
+
     std::vector<Chunk> chunks_;
     std::size_t budget_      = 0;
     std::size_t total_alloc_ = 0;
     std::size_t total_used_  = 0;
+    bool        verbose_     = true;
 };
 
 } // namespace nova

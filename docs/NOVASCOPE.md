@@ -219,3 +219,44 @@ bias.qkv    280 次   3.551 ms   5.2%   ← 3072 个 float，却要 12.7 us/次
    每个只动几 KB 数据，纯粹是发射/延迟开销。280 次 × 12.7 us = 3.5 ms 只为了给 3072 个 float 加 bias。
 3. **探针本身的开销**：103.18 tok/s（带 3400 对事件）vs 127 tok/s（不带）= **约 23%**。
    所以性能结论要关掉探针测，探针只用来定位"谁慢"。
+### 7.6 三级兜底与"为什么 7B 还是进不去"（2026-11-10 17:10）
+
+`DeviceArena` 现在按顺序尝试：
+
+1. **cudaMalloc**，失败重试 5 次 × 100 ms（WDDM 下桌面合成器会周期性归还额度）；
+2. **cudaMallocManaged**（托管内存）；
+3. **cudaHostAllocMapped**（映射主机内存，UVA 下内核可直读，走 PCIe）。
+
+每块到手立刻 `cudaMemset`/`memset` 触碰全部页，把 page fault 提前到加载期。
+
+**实测结论：三级全部撞同一堵墙。**
+
+| 事实 | 数值 | 含义 |
+|---|---|---|
+| `concurrentManagedAccess` | **0** | 1080 Ti（Pascal, sm 6.1）**不支持托管内存超额订阅**；`cudaMallocManaged` 只是换个分配器，装不下照样 OOM |
+| `pageableMemoryAccess` | **0** | 同上，没有 HMM/pageable 访问 |
+| 空进程里 `cudaHostAllocMapped 512 MiB` | ok（16/32/64/128/256/512 全部 ok） | 映射主机内存在**预算空闲**时可用 |
+| 在预算耗尽的进程里同样的调用 | `invalid argument` | 说明 WDDM 下 pinned 映射**也要占一份设备侧预算** |
+
+所以那个 ~2 GiB 的限制不是"分配 API 的问题"，而是**进程级的设备侧额度**：device / managed /
+pinned-mapped 三种映射都算在同一份账上。1.5B（1.45 GiB）装得下，7B（4.5 GiB）在这台机器
+当前状态下装不下 —— 这不是代码能绕过去的，只能靠减小同时持有的显存（跨进程分片、
+或换一张不在 WDDM 桌面合成器下的卡）。
+
+**顺带修的一个真 bug**：`Profiler::end()` 现在每个算子结束都 `NOVA_CU(cudaGetLastError())`。
+之前 kernel 失败后进程继续跑、拿没写过的缓冲去采样，就是 TDR / 0x12 的来源。
+
+修正后的 1.5B 端到端（1080 Ti，10 token，带探针）：
+
+```
+wall 70.285 ms   GPU 忙 66.666 ms (94.9%)   权重流量 4868.28 MiB (72.63 GB/s)
+拷贝 20 次 / 5.80 MiB / 3.619 ms (5.1%)     2.00 次/token, 594 KiB/token
+
+gemv.gate 18.641 ms (28.0%, 116.3 GB/s) | gemv.down 9.899 ms (14.8%, 219.0)
+o_proj 5.656 ms (8.5%, 65.7) | head 5.469 ms (8.2%, 547 us/次)
+gemv.q 5.215 ms (7.8%, 71.3) | swiglu 4.580 ms | rmsnorm.attn 3.290 ms
+attn_decode 3.230 ms (4.8%) | bias.qkv 3.551 ms (5.2%)
+```
+
+注：`bias.qkv`（3.55 ms/10 token，12.7 µs/次）和 `rmsnorm`（6.5 ms）的融合**还没做** ——
+它们合计占 14.6%，是下一步最划算的一刀（把 bias 写进 GEMV 尾巴、把 rmsnorm 与 quant 合并）。
