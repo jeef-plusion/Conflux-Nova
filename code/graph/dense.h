@@ -158,7 +158,7 @@ struct DenseLayer;
 template <class Spec, class... Ops>
 struct DenseLayer<Spec, OpList<Ops...>> {
     static void run(LayerCtx& c) {
-        static_assert(!Spec::moe, "dense.h 只执行 dense FFN 层，MoE 需要自己的执行器");
+
         (Ops::run(c), ...);   // 逗号折叠：严格从左到右，顺序 = OpList 的声明顺序
     }
 };

@@ -10,6 +10,8 @@
 #include "graph/kv_pool.h"
 #include "graph/kv_pool_cfg.h"   // kKvBlock：块池寻址的唯一真源
 #include "model/sycl/scope_core.h"   // NovaScope 统计核心（纯 C++，CUDA/SYCL 共用）
+#include "model/cuda/scope_cuda.h"   // NovaScope 的 CUDA 事件池与 pending 队列
+
 
 namespace nova {
 
@@ -22,10 +24,13 @@ struct Profiler {
     int         cur = -1;
 
     // ---- NovaScope ----
-    // scoped=true 时走非阻塞路径：begin/end 只记录事件对，最后 NovaScope::resolve_all()
-    // 统一算时长。老路径（scoped=false）保持原样（每段同步 + 累加 acc），供原有基准使用。
+    // scoped=true 时走非阻塞路径：begin 在流里记一个事件，end 再记一个，最后统一
+    // resolve_all() 用 cudaEventElapsedTime 算时长。老路径（scoped=false）保持原样
+    // （每段同步 + 累加 acc），供原有基准使用。
     bool        scoped = false;
     std::size_t sc_idx = 0;          // 当前这条在 Scope::recs() 里的下标
+    cudaStream_t stream = nullptr;   // 本层用的流（dense.h 在 run() 开头设一次）
+    cudaEvent_t  a_ = nullptr, b_ = nullptr;   // 当前 op 的事件对（来自 scope 的池）
 
     void init() { cudaEventCreate(&e0); cudaEventCreate(&e1); }
 
@@ -37,6 +42,9 @@ struct Profiler {
             auto& s = nova::scope::Scope::get();
             sc_idx = s.recs().size();
             s.begin(name ? name : phase_tag(p), nova::scope::Phase::Compute, bytes);
+            a_ = nova::scope::pool().take();
+            b_ = nova::scope::pool().take();
+            if (a_ && b_) cudaEventRecord(a_, stream);
             cur = p;
             return;
         }
@@ -48,8 +56,14 @@ struct Profiler {
     void end() {
         if (scoped) {
             if (cur < 0) return;
-            auto& s = nova::scope::Scope::get();
-            s.finish(s.recs()[sc_idx]);     // host 侧兜底时长（resolve 时会用事件覆盖）
+            if (a_ && b_) {
+                cudaEventRecord(b_, stream);
+                nova::scope::pendings().push_back(nova::scope::PendingC{sc_idx, a_, b_});
+            } else {
+                auto& s = nova::scope::Scope::get();
+                s.finish(s.recs()[sc_idx]);     // 没拿到事件：退回 host 时间
+            }
+            a_ = b_ = nullptr;
             cur = -1;
             return;
         }

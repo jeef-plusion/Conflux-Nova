@@ -173,3 +173,49 @@ build\cuda_scope.exe build\q4k_15b.gguf 10
 
 产出 `nova_trace_cuda.json` / `.csv`，拖进 `chrome://tracing`；仪表盘用
 `tools/novascope.html`（或把 trace 内联进 HTML 后截图，见 `build\novascope_cuda.png`）。
+### 7.5 端到端跑通之后的修正（2026-11-10 16:50）
+
+**先纠一个我自己写错的结论**：7.3 节说的"分配上限"不是尺寸问题。用 `build\lt\oom_sweep.cu`
+做了三组实验：
+
+| 实验 | 结果 |
+|---|---|
+| A. 单次分配、测完立刻 free（64 MiB → 4 GiB，含 2^n ± 1KB/64KB/1MiB/16MiB） | **全部成功，连 4 GiB 都成功** |
+| B. 连续分配 256 MiB 不释放 | 第 8 块（累计 2.00 GiB）成功，第 9 块 OOM（此时仍报 7.08 GiB 空闲） |
+| C. 256 MiB 分配-释放 20 轮 | 20 次全成功，free 每轮回到 9.08 GiB |
+
+结论：**不是尺寸/对齐，而是"同时持有"的额度（约 2 GiB），且它是动态的** ——
+取决于桌面合成器/浏览器此刻占用多少。16:47 那个时刻额度放开，模型就加载成功了。
+所以 7.3 第 1 条应从"驱动硬上限"改读成"动态的进程显存预算"。
+
+**同时修掉一个我自己的埋点 bug**：`Profiler` 的 `scoped` 分支最初只记了 host 时间，
+导致整模型那栏的"GPU 时间"其实是提交时间 —— 现象是 `gemv.gate` 报出 1238 GB/s
+（超过 484 GB/s 峰值，物理不可能）。修法：`begin/end` 里真正 `cudaEventRecord` 一对事件
+（流由 `cLayerCtx.w.s` 传给 `Profiler::stream`），修完后 GPU 忙比从 21.6% 变成 **93.0%**。
+
+修正后的真实端到端（1080 Ti，1.5B，10 token，带探针）：
+
+```
+wall 73.163 ms   GPU 忙 68.067 ms (93.0%)   权重流量 4868.28 MiB (69.77 GB/s)
+拷贝 20 次 / 5.80 MiB / 5.096 ms (7.0%)     拷贝触发率 2.00 次/token, 594 KiB/token
+
+gemv.gate   280 次  18.567 ms  27.3%  116.74 GB/s  ← 最热
+gemv.down   280 次   9.845 ms  14.5%  220.17 GB/s
+o_proj      280 次   5.445 ms   8.0%   68.25 GB/s
+gemv.q      280 次   5.155 ms   7.6%   72.08 GB/s
+head         10 次   5.007 ms   7.4%  262 GB/s（131 MB 词表投影，单次 500 us）
+swiglu      280 次   4.836 ms   7.1%
+rmsnorm.*   560 次   5.875 ms  11.4%
+bias.qkv    280 次   3.551 ms   5.2%   ← 3072 个 float，却要 12.7 us/次
+```
+
+三个值得追的发现（都还能再挖）：
+
+1. **同样 7.4 MiB、同样 kernel，gate 只有 116.7 GB/s，down 有 220.2 GB/s** —— 差 1.9 倍。
+   gate/up 是连续的两次大读，down 在 swiglu 之后，访存节奏不同；这跟 SYCL 侧"有效带宽只有
+   顺序读 60%"是同一类问题的 CUDA 版本。
+2. **端到端有效带宽 69.8 GB/s，而孤立 GEMV 微基准是 235.6 GB/s** —— 差 3.4 倍。
+   差距不在 GEMV，而在那些"零碎算子"：bias 12.7 us/次、rmsnorm 16.2 us/次、swiglu 17.3 us/次，
+   每个只动几 KB 数据，纯粹是发射/延迟开销。280 次 × 12.7 us = 3.5 ms 只为了给 3072 个 float 加 bias。
+3. **探针本身的开销**：103.18 tok/s（带 3400 对事件）vs 127 tok/s（不带）= **约 23%**。
+   所以性能结论要关掉探针测，探针只用来定位"谁慢"。
