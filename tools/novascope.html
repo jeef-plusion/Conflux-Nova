@@ -90,7 +90,7 @@
   </div>
 </div>
 
-<footer>数据来源：SYCL profiling 事件（kernel 起止）· 频率/温度/EU 占用若无外部采样器则显示 n/a，不编数。</footer>
+<footer>数据来源：SYCL profiling 事件（kernel 起止）· 频率/温度/EU 占用若无外部采样器则显示 n/a，不编数。<br><span style="color:#5b6474">页面启动时看到的是<b>内置演示流</b>（按 34 GB/s 纯权重读的近似，约 22.5 ms/token，只为看动效）；真实数字请拖入 <code>nova_trace.json</code> 或用 <code>sycl_e2e.exe --scope</code> 生成。</span></footer>
 
 <script>
 // ---------------------------------------------------------------------------
@@ -141,14 +141,24 @@ function loadTrace(json){
 // 让打开页面就能看到粒子在动，方便先验收观感
 // ---------------------------------------------------------------------------
 function demoTrace(tokens){
+  // 真实 1.5B 量级（Arc 130T 实测：953.8 MiB/token、28.14 ms/token ⇒ 33.9 GB/s）：
+  //   每层权重 26.2 MB（q 1.27 + k 0.22 + v 0.22 + o 1.27 + gate/up/down 各 7.74）
+  //   单 op 时长 ≈ 权重字节 / 34 GB/s，非 GEMV 的小算子按实测 ~3~20 µs 填
+  const B = 34e9;                      // 有效带宽（B/s）
+  const us = b => Math.max(2, Math.round(b / B * 1e6 * 100) / 100);
+  const qb = 1536*1536/256*144, kvb = 1536*256/256*144, ffb = 8960*1536/256*144;
   const ops = [
-    ['rmsnorm_quant',6,36e3],['gemv.q',72,9e6],['gemv.k',20,1.1e6],['gemv.v',20,1.1e6],
-    ['bias.q',2,6e3],['rope',3,8e3],['kv_store',2,8e3],['attn_decode',9,8e3],
-    ['quant_rows',2,8e3],['gemv.o',25,2.2e6],['residual.attn',2,8e3],
-    ['rmsnorm_quant.ffn',6,36e3],['gemv.gate',25,3e6],['gemv.up',25,3e6],
-    ['swiglu',4,16e3],['gemv.down',38,4.5e6],['residual.ffn',2,8e3]
+    ['rmsnorm_quant', us(2*1536*4)+4, 2*1536*4],
+    ['gemv.q',        us(qb),  qb], ['gemv.k', us(kvb), kvb], ['gemv.v', us(kvb), kvb],
+    ['bias.q', 3, 6e3], ['rope', 4, 8e3], ['kv_store', 2, 8e3],
+    ['attn_decode', 18, 8e3], ['quant_rows', 2, 8e3],
+    ['gemv.o', us(qb), qb], ['residual.attn', 2, 8e3],
+    ['rmsnorm_quant.ffn', us(2*1536*4)+4, 2*1536*4],
+    ['gemv.gate', us(ffb), ffb], ['gemv.up', us(ffb), ffb],
+    ['swiglu', 6, 8960*4], ['gemv.down', us(ffb), ffb], ['residual.ffn', 2, 8e3]
   ];
-  const copies = [['H2D',12,4],['H2D',8,65536],['D2H',180,607744],['D2H',6,4096]];
+  // 每 token 的拷贝：token id（H2D 4 B）+ 激活上传 + logits 回传（151936 × 4 B）+ 杂项
+  const copies = [['H2D', 12, 4], ['H2D', 8, 65536], ['D2H', 180, 151936*4], ['D2H', 6, 4096]];
   const evs = []; let ts = 0;
   for (let tk = 0; tk < tokens; tk++){
     for (const c of copies){ evs.push({name:c[0],cat:'copy',ph:'X',ts,dur:c[1],pid:1,tid:1,args:{bytes:c[2],tok:tk,layer:-1,gap_us:3}}); ts += c[1]; }
