@@ -6,6 +6,12 @@
 
 `FJEC_` ：来自作者的编译版本（From the Author's Compiled Build）。每一个官方发行的二进制都带这个前缀，用来和贡献者自己编译的版本区分。
 
+> **两条独立的后端线，别混着读：**
+> - **CUDA（1080 Ti，本文主线）**：`code/` + `src/kernel/*.cu` + `build_core.bat`。
+> - **SYCL（Intel Arc 130T，旁支）**：`src/kernel/sycl/` + `code/device/sycl/` + `build_sycl*.bat`，
+>   与 CUDA 线**不共享任何源文件与宏**。状态、数字、坑都在 **[`docs/STATE.md`](docs/STATE.md)**：
+>   算子层与 1.5B 端到端已跑通（实测 35.5 tok/s），DeepSeek-V2-Lite 的 MLA/MoE 算子已验完、
+>   loader 能读混量化 GGUF，但还缺 Q5_0/Q8_0/Q6_K 的 GEMV 与按层流式加载。
 
 本文分两部分：**第一部分讲架构思想**（为什么这么设计），**第二部分讲这一版发行的优化**（它具体有什么、怎么用）。
 
