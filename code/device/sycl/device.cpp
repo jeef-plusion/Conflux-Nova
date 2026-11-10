@@ -279,23 +279,29 @@ void Device::note_free(std::uint64_t bytes, MemTag tag) {
 }
 
 void Device::upload(void* dst, const void* src, std::uint64_t bytes) {
-    // NovaScope：H2D 记账（次数 + 字节 + 事件时间）。关掉时 note_copy 是空函数。
+    if (bytes == 0) return;
+    // NovaScope：H2D 记账（次数/字节/事件时间）。
+    // 关键：插桩**不能改变同步语义** —— 原来这里 memcpy 之后必须 wait_and_throw()，
+    // 因为调用方（ChunkedWeight::upload）会立刻复用同一块 pinned 缓冲。
+    // 之前插桩路径直接 return、漏了同步，等于让几百次权重上传变成异步 + 复用缓冲，
+    // 这就是 "--scope 才崩、且崩在 E2ERunner 构造期" 的根因。
     if (::nova::scope::Scope::get().enabled()) {
         NOVA_SCOPED_COPY("H2D", static_cast<std::int64_t>(bytes), q_.memcpy(dst, src, bytes));
+        q_.wait_and_throw();
         return;
     }
-    if (bytes == 0) return;
     q_.memcpy(dst, src, bytes);
     q_.wait_and_throw();
 }
 
 void Device::download(void* dst, const void* src, std::uint64_t bytes) {
-    // NovaScope：D2H 记账（logits 回传就是这里）
+    if (bytes == 0) return;
+    // NovaScope：D2H 记账（logits 回传就是这里）。同样保留同步语义。
     if (::nova::scope::Scope::get().enabled()) {
         NOVA_SCOPED_COPY("D2H", static_cast<std::int64_t>(bytes), q_.memcpy(dst, src, bytes));
+        q_.wait_and_throw();
         return;
     }
-    if (bytes == 0) return;
     q_.memcpy(dst, src, bytes);
     q_.wait_and_throw();
 }

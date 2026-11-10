@@ -26,6 +26,15 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// 崩溃点探针：写文件并 fclose。fastfail 时管道里的字节会丢，文件不会。
+void mark(const char* what, int step) {
+    std::printf("[mark %02d] %s\n", step, what);
+    FILE* f = std::fopen("e2e_progress.log", "ab");
+    if (!f) return;
+    std::fprintf(f, "[mark %02d] %s\n", step, what);
+    std::fclose(f);
+}
+
 double secs(Clock::time_point a, Clock::time_point b) {
     return std::chrono::duration<double>(b - a).count();
 }
@@ -81,6 +90,8 @@ void usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    std::remove("e2e_progress.log");
+    mark("main 入口", 0);
     // 无缓冲：带探针时如果崩在某个 SYCL 调用里，前面已经打印的步骤才不会丢
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("[e2e] 启动\n");
@@ -120,6 +131,7 @@ int main(int argc, char** argv) {
     if (n_gen < 1) n_gen = 1;
     if (n_gen + 128 > ctx) { std::printf("[e2e] --tokens 太大（KV 只有 %d 个位置）\n", ctx); return 1; }
 
+    mark("参数解析完成", 1);
     std::printf("=== SYCL 端到端 decode（model=%s）===\n", kSyclModelName);
 
     // ---- 分词器 ----
@@ -150,12 +162,14 @@ int main(int argc, char** argv) {
     }
 
     // ---- runner ----
+    mark("分词完成，准备构造 runner", 2);
     nova::sycls::E2ERunner runner(gguf, ctx);
     std::printf("[e2e] 权重 %.1f MiB，ctx=%d\n",
                 static_cast<double>(runner.weight_bytes()) / (1024.0 * 1024.0), runner.ctx_max());
 
     if (warmup > 0) {
         std::printf("[e2e] 预热 %d 次...\n", warmup);
+    mark("runner 构造完成（队列+权重上传）", 3);
         runner.warmup(warmup);
     }
 
@@ -173,6 +187,15 @@ int main(int argc, char** argv) {
     std::vector<int> out;
     out.reserve(static_cast<std::size_t>(n_gen));
     double t_gen = 0.0;
+    mark("预热完成，开始生成", 4);
+    // 关键：把"加载期"的记录丢掉 —— 953 MiB 权重上传会把墙钟和拷贝率彻底带偏，
+    // 探针只该统计"生成"这一段。
+    if (want_scope) {
+        ::nova::scope::resolve_all(runner.device().q());
+        ::nova::scope::Scope::get().clear();
+        ::nova::scope::Scope::get().set_token(0);
+        mark("已清空加载期记录", 5);
+    }
     for (int i = 0; i < n_gen; ++i) {
         out.push_back(next);
         if (i + 1 == n_gen) break;                       // 最后一个不需要再前进一步
@@ -185,9 +208,12 @@ int main(int argc, char** argv) {
     // ---- NovaScope 收尾：把边界事件换算成区间，打印四组统计并落盘 ----
     if (want_scope) {
         ::nova::scope::Scope::get().set_token(-1);
+    mark("生成循环结束，准备 resolve", 6);
         ::nova::scope::resolve_all(runner.device().q());
+    mark("resolve 完成", 7);
         ::nova::scope::Scope::get().print_report(stdout);
         const bool okj = ::nova::scope::Scope::get().write_trace("nova_trace.json");
+    mark("report + trace 写完", 8);
         const bool okc = ::nova::scope::Scope::get().write_csv("nova_trace.csv");
         std::printf("\n[scope] trace: %s (nova_trace.json) | %s (nova_trace.csv)\n",
                     okj ? "ok" : "FAILED", okc ? "ok" : "FAILED");

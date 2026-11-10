@@ -100,38 +100,40 @@ inline void resolve_all(sycl::queue& q) {
     idxs.reserve(pendings().size());
 
     for (auto& p : pendings()) {
-        std::int64_t st = 0, en = 0;
+        std::int64_t en = 0;
         try {
-            st = static_cast<std::int64_t>(
-                p.ev.get_profiling_info<sycl::info::event_profiling::command_start>());
             en = static_cast<std::int64_t>(
                 p.ev.get_profiling_info<sycl::info::event_profiling::command_end>());
         } catch (...) {
-            st = 0; en = 0;   // 队列没开 profiling：保持 host 时间，不编数
+            en = 0;   // 队列没开 profiling：保持 host 时间，不编数
         }
-        // 真 bug（被 probe_trace.json 抓到）：以前只取 end，再把它和 host 提交时刻相减，
-        // 两个时钟（steady_clock vs GPU 单调时钟）混用 -> ts 变成负数、gap 变成 -5e14。
-        // 现在 start/end 都取设备时钟，report 时间轴整体落在 GPU 时钟域里；
-        // submit_ns 跟着对齐到 start（gap 恒 0，不再编造跨时钟差值）。
-        const std::int64_t d = (st != 0 && en >= st) ? (en - st) : 0;
-        if (d > 0) {
-            Rec& r = s.recs()[p.idx];
-            r.start_ns = st;
-            r.end_ns = en;
-            r.submit_ns = st;
-            r.resolved = true;
-        }
-        ends.push_back(d > 0 ? st : 0);
+        // 取 command_end（设备时钟）作为"第 i 次发射到此全部完成"的边界。
+        // 为什么不用 command_start/end 的差：边界事件的 profiling 信息描述的是
+        // barrier 自身（~1 us），不是它前面那个 kernel —— 那样会量出 gemv.gate
+        // "4 us / 1827 GB/s" 这种不可能的数（真机实测过）。
+        // 正确做法：in_order 队列上，第 i 个 kernel 的区间 = 相邻边界的差。
+        ends.push_back(en);
         idxs.push_back(p.idx);
     }
 
-    // 兜底：连 command_start 都拿不到的记录，退化成 host 时间（至少不出现负数/乱序）
+    // 时间线：第 i 条 = [prev_end, ends[i]]；第一条没有前驱，时长记 0
+    std::int64_t prev_end = 0;
     for (std::size_t k = 0; k < ends.size(); ++k) {
         Rec& r = s.recs()[idxs[k]];
-        if (r.resolved) continue;
-        if (r.start_ns == 0) r.start_ns = r.host_ns;
-        if (r.end_ns <= r.start_ns) r.end_ns = r.start_ns + 1;   // 保证 dur > 0，便于画图
-        r.submit_ns = r.start_ns;
+        const std::int64_t e = ends[k];
+        if (e == 0) {                       // 没有设备时间：退回 host 时间，保证 dur > 0
+            if (r.start_ns == 0) r.start_ns = r.host_ns;
+            if (r.end_ns <= r.start_ns) r.end_ns = r.start_ns + 1;
+        } else if (prev_end == 0) {
+            r.start_ns = e;                 // 第一条：只有终点可依，时长 0
+            r.end_ns = e;
+            prev_end = e;
+        } else {
+            r.start_ns = prev_end;
+            r.end_ns = e;
+            prev_end = e;
+        }
+        r.submit_ns = r.start_ns;           // gap 恒 0：host 与设备时钟不可比
         r.resolved = true;
     }
     pendings().clear();
