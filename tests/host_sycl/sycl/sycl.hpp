@@ -300,12 +300,15 @@ void execute(const nd_range<Dim>& nd, F f) {
     const std::size_t local_0    = nd.get_local_range()[0];
     const std::size_t groups     = nd.get_global_range()[0] / local_0;
     const std::size_t lid1_range = lid1_range_of<Dim>(nd.get_local_range());
-    const std::size_t n_sg       = local_n / static_cast<std::size_t>(kShimSgSize);
+    // subgroup 不能比 work-group 大：kernel 用 reqd_sub_group_size 写死 16/32，
+    // 但有些 kernel 只发 1 个 work-item（如 top-k）。这里取 min，垫片才不会被 OOB 打死。
+    const std::size_t sg_sz      = std::min<std::size_t>(static_cast<std::size_t>(kShimSgSize), local_n);
+    const std::size_t n_sg       = local_n / sg_sz;
 
     std::vector<std::unique_ptr<SgCtx>> sg_ctx;
     sg_ctx.reserve(n_sg);
     for (std::size_t i = 0; i < n_sg; ++i) {
-        sg_ctx.emplace_back(new SgCtx(static_cast<std::size_t>(kShimSgSize)));
+        sg_ctx.emplace_back(new SgCtx(sg_sz));
     }
     Barrier wg_barrier(local_n);
 
@@ -315,8 +318,8 @@ void execute(const nd_range<Dim>& nd, F f) {
         pool.emplace_back([&, t] {
             std::size_t lid0 = 0, lid1 = 0;
             local_coords<Dim>(nd.get_local_range(), t, lid0, lid1);
-            SgCtx*       sg      = sg_ctx[t / static_cast<std::size_t>(kShimSgSize)].get();
-            const int    lane_sg = static_cast<int>(t % static_cast<std::size_t>(kShimSgSize));
+            SgCtx*       sg      = sg_ctx[t / sg_sz].get();
+            const int    lane_sg = static_cast<int>(t % sg_sz);
             nd_item<Dim> it;
             for (std::size_t g = 0; g < groups; ++g) {
                 it.detail_set(g, lid0, lid1, lid1_range, g * local_0 + t, sg, lane_sg, &wg_barrier);

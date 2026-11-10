@@ -103,6 +103,27 @@ void attn_prefill(const float* qv, const float* kc, const float* vc, float* o,
                   int n_q, int n_past, sycl::queue& q);
 
 // ---------------------------------------------------------------------------
+// mla.cpp —— DeepSeek-V2-Lite 的 Multi-head Latent Attention（单 token decode）
+//   q 每 head 192 维（nope 128 + rope 64）、K 同宽、V 每 head 128 维；
+//   cache 是展开后的 [ctx][NH][192] / [ctx][NH][128]（见 docs/DEEPSEEK_V2_LITE.md）。
+// ---------------------------------------------------------------------------
+void mla_rope_apply(float* qv, float* kv, std::int64_t pos, const float* cs, const float* sn,
+                    sycl::queue& q);
+void mla_kv_store(float* kc, float* vc, const float* k_nope, const float* k_rope, const float* v,
+                  std::int64_t pos, sycl::queue& q);
+void mla_decode(const float* qv, const float* kc, const float* vc, float* o, int n_past,
+                sycl::queue& q);
+
+// ---------------------------------------------------------------------------
+// moe.cpp —— DeepSeek-V2-Lite 的 MoE 前段：路由打分 + top-k 归一化
+//   64 个 routed expert（sigmoid 打分、取前 6、按和归一化）+ 2 个 shared expert（恒开，
+//   权重固定 1）。专家本身的 gate/up/down 复用 gemv<>，由 runner 按 idx 逐个调用。
+//   idx/w 各 kTopK 个；idx 按分数降序。
+// ---------------------------------------------------------------------------
+void moe_router(const float* x, const float* w_router, float* scores, sycl::queue& q);
+void moe_topk(const float* scores, int* idx, float* w, sycl::queue& q);
+
+// ---------------------------------------------------------------------------
 // 显式实例化清单（定义在各自 .cpp 里）；漏一个就是链接错误，不会静默走慢路径。
 // ---------------------------------------------------------------------------
 extern template void quant_rows<kD   >(ActQ8View, const float*, int, sycl::queue&);
