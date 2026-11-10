@@ -1,5 +1,6 @@
 // nova_v2/src/model.cpp — 权重上传 + 逐层 forward（工作区/流按会话传入）
 #include "nova/model.h"
+#include "model/cuda/scope_cuda.h"
 #include "nova/loader/validate.h"
 #include "graph/graph.h"    // 计算图层：一层由哪些算子按什么顺序组成（编译期）
 #include <cstdio>
@@ -150,7 +151,8 @@ void Engine::make_workspace(Workspace* wp, int n_max, cudaStream_t s) {
 
 void Engine::prefill(Workspace& w, const int* ids, int n, const int32_t* table, int64_t pos0) {
     NOVA_REQUIRE(n <= w.n_max);
-    NOVA_CU(cudaMemcpyAsync(w.ids, ids, (size_t)n * sizeof(int), cudaMemcpyHostToDevice, w.s));
+    NOVA_SCOPED_COPY_CU("H2D.ids", (std::int64_t)n * 4, w.s,
+        NOVA_CU(cudaMemcpyAsync(w.ids, ids, (size_t)n * sizeof(int), cudaMemcpyHostToDevice, w.s)););
     Kernel::embed(w.x, tok_embd_, w.ids, n, w.s);
     for (int l = 0; l < Model::L; ++l) layer(w, l, n, pos0, table);
     head(w, n);
@@ -158,7 +160,8 @@ void Engine::prefill(Workspace& w, const int* ids, int n, const int32_t* table, 
 }
 
 int Engine::decode(Workspace& w, int id, const int32_t* table, int64_t pos) {
-    NOVA_CU(cudaMemcpyAsync(w.ids, &id, sizeof(int), cudaMemcpyHostToDevice, w.s));
+    NOVA_SCOPED_COPY_CU("H2D.id", 4, w.s,
+        NOVA_CU(cudaMemcpyAsync(w.ids, &id, sizeof(int), cudaMemcpyHostToDevice, w.s)););
     Kernel::embed(w.x, tok_embd_, w.ids, 1, w.s);
     for (int l = 0; l < Model::L; ++l) layer(w, l, 1, pos, table);
     head(w, 1);
@@ -189,8 +192,10 @@ void Engine::cow_guard(KvSlice& sl, int64_t pos, cudaStream_t s) {
 
 int Engine::sample_last(Workspace& w) {
     if (h_logits_.empty()) h_logits_.resize((size_t)Model::V);
-    NOVA_CU(cudaMemcpyAsync(h_logits_.data(), w.logits, (size_t)Model::V * sizeof(float),
-                            cudaMemcpyDeviceToHost, w.s));
+    // 608 KB logits 回传：NovaScope 里它就是 D2H 那条红粒子，能看出它堵不堵流水线
+    NOVA_SCOPED_COPY_CU("D2H.logits", (std::int64_t)Model::V * 4, w.s,
+        NOVA_CU(cudaMemcpyAsync(h_logits_.data(), w.logits, (size_t)Model::V * sizeof(float),
+                                cudaMemcpyDeviceToHost, w.s)););
     NOVA_CU(cudaStreamSynchronize(w.s));
 
     const int V = (int)Model::V;

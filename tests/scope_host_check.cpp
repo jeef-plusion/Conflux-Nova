@@ -119,7 +119,8 @@ struct Ref {
 
 Ref ref_of(const std::vector<Rec>& rs) {
     Ref f;
-    std::int64_t t0 = rs.empty() ? 0 : rs.front().submit_ns;
+    // 墙钟口径 = 设备时间轴：第一个 op 的 start 到最后一个 op 的 end
+    const std::int64_t t0 = rs.empty() ? 0 : rs.front().start_ns;
     std::int64_t t1 = t0;
     for (const auto& r : rs) {
         t1 = std::max(t1, r.end_ns);

@@ -120,3 +120,56 @@ build\sycl\sycl_e2e.exe --gguf build\q4k_15b.gguf --tokens 10 --scope
    接 `zesDeviceEnumFrequencyDomains` 读当前频率；EU 利用率要靠 OA/Metrics，iGPU 上通常不可用；
 3. **按 SM/EU 的热力图**：需要 `sub_group` 级采样，代价很大，优先级最低；
 4. **WebSocket 推送器**：`tools/novascope_push.cpp` 把 `Rec` 逐条 JSON 推给页面（目前页面已支持该入口）。
+
+---
+
+## 7. CUDA 移植与 1080 Ti 实测（2026-11-10）
+
+### 7.1 移植方式
+
+| 层 | 文件 | 说明 |
+|---|---|---|
+| 探针 | `code/model/cuda/scope_cuda.h` | `cudaEventRecord` 成对 + `cudaEventElapsedTime`；**事件池复用**、**不在 begin/end 里同步** |
+| 埋点 | `code/graph/dense.h`（12 处）、`src/model.cpp`（3 处拷贝） | 12 个算子传入名字与权重字节；H2D.id / H2D.ids / D2H.logits |
+| 驱动 | `tests/cuda_scope.cpp` + `build_cuda_scope.bat` | 整模型 10 token（需能装下） |
+| 微基准 | `tests/cuda_scope_micro.cpp` + `build_scope_micro.bat` | 真实 `Kernel::gate_n`（8960×1536 Q4_K），200 次 |
+| Profiler | `include/nova/model.h` | 增加 `scoped` 非阻塞路径；老路径保持每段同步不动 |
+
+### 7.2 实测结果（真 kernel、真事件）
+
+```
+形状 8960 x 1536，重复 200 次，权重 7.4 MiB
+wall 6.573 ms   GPU 忙 100.0%   权重流量 1476.56 MiB   有效带宽 235.57 GB/s
+gemv_q4k: 200 次 / 6.573 ms / 32.86 us 每次 / 235.57 GB/s
+```
+
+- 1080 Ti 理论带宽 484 GB/s（11 Gbps × 352 bit），**实到 235.6 GB/s = 49%**。
+  这是单列 GEMV（每列只读一遍权重、每行 8 lane）的真实上界，不是"跑满显存"的负载。
+- 事件对差值 = 32.86 µs/次；把 200 次连起来看 GPU 忙比 100%（无空隙）。
+
+### 7.3 两个环境级发现（不是代码问题）
+
+1. **单次/累计 `cudaMalloc` 上限**：同一张卡空闲 9.08 GiB 时，
+   `1.00 GiB` 成功、`1.66 GiB` 失败；连续 256 MiB 分块时**第 4 次必失败**。
+   这是驱动/WDDM 侧的进程配额（桌面合成器与浏览器在共享这张卡）。
+   为此把 `DeviceArena` 改成 **512 MiB 分块**（`kChunkBytes`），并把
+   `kMaxCtx / kMaxSessions / kSessCtx` 做成编译期可覆盖（`NOVA_MAX_CTX` 等），
+   但配额本身仍在，**整模型（1.5B=1.45 GiB、7B=4.5 GiB）在这台机器当前状态下装不进去**。
+2. **CUDA 事件测不出 host 提交→device 开始的延迟**（那要 CUPTI）。
+   所以 CUDA 路径把 `gap` 恒置 0，不编数；改由 `host_span_ns / wall_ns` 反映队列深度。
+
+### 7.4 复现
+
+```bat
+:: 微基准（一定能跑，7.4 MiB 权重）
+build_scope_micro.bat
+build\cuda_scope_micro.exe 200
+
+:: 整模型（需要显存配额放开）
+build_cuda_scope.bat NOVA_MODEL_QWEN25_1P5B
+set NOVA_SCOPE=1
+build\cuda_scope.exe build\q4k_15b.gguf 10
+```
+
+产出 `nova_trace_cuda.json` / `.csv`，拖进 `chrome://tracing`；仪表盘用
+`tools/novascope.html`（或把 trace 内联进 HTML 后截图，见 `build\novascope_cuda.png`）。

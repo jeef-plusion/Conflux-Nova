@@ -1,9 +1,10 @@
-// nova_v2/memory/arena.h — 唯一一次 cudaMalloc，之后只有 bump；溢出即断
+// nova_v2/memory/arena.h — 唯一的显存来源：预算是 load 期算好的，分配按块做，之后只有 bump
 #pragma once
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <cuda_runtime.h>
 #include "nova/config.h"
 
@@ -28,41 +29,78 @@ inline void cu_ok(cudaError_t e, const char* what, const char* file, int line) {
 }
 #define NOVA_CU(call) ::nova::cu_ok((call), #call, __FILE__, __LINE__)
 
+// ---------------------------------------------------------------------------
+// 为什么按块分配（2026-11-10 在 1080 Ti 上的实测）：
+//   同一张卡、空闲 9.08 GiB，单次 cudaMalloc 的表现是
+//       1.00 GiB -> ok
+//       1.66 GiB -> out of memory
+//   也就是 WDDM 下存在"单次分配上限"（远小于空闲量）。原来 init() 一次要 1.66 GiB
+//   （权重 828 + KV 448 + 工作区 260 + 预留 128），直接 OOM，模型根本加载不了。
+//   所以改成：预算照旧一次算好（cap() 仍是那个数），实际分配切成 512 MiB 的块，
+//   每次 alloc 先看当前块放不放得下，放不下就开新块。语义与"一整块"完全一致
+//   （所有指针都来自 alloc()，热路径仍是指针加法），只是绕开了单次上限。
+// ---------------------------------------------------------------------------
 class DeviceArena {
 public:
-    // 初始化时调用一次。整机的权重、KV、scratch 全从这里切。
+    static constexpr std::size_t kChunkBytes = 512ull * 1024 * 1024;
+
+    // 只记预算，不分配（分配推迟到第一次 alloc，便于把 OOM 精确归因到某个张量）
     void init(std::size_t bytes) {
-        NOVA_REQUIRE(base_ == nullptr);
+        NOVA_REQUIRE(chunks_.empty());
         NOVA_REQUIRE(bytes <= (std::size_t)7ull * 1024 * 1024 * 1024 + kArenaReserve);
-        base_ = nullptr;
-        // 分配失败时 cudaMalloc 会把 base_ 置空；不检查就会得到 base_+offset 这种
-        // 假指针，之后所有 kernel/拷贝全部失败而无人知晓（OOM 退化成垃圾输出）。
-        NOVA_CU(cudaMalloc(&base_, bytes));
-        NOVA_REQUIRE(base_ != nullptr);
-        cap_ = bytes;
-        off_ = 0;
+        budget_ = bytes;
+        total_alloc_ = 0;
+        total_used_ = 0;
     }
 
-    // 偏移在 load 期一次算定，热路径只做指针加法
     void* alloc(std::size_t bytes, std::size_t align = 256) {
-        std::size_t o = (off_ + align - 1) & ~(align - 1);
-        NOVA_REQUIRE(o + bytes <= cap_);      // 池不够 = 维度或预算错了，直接炸
-        void* p = base_ + o;
-        off_ = o + bytes;
-        return p;
+        NOVA_REQUIRE(align <= 256);            // 新块天然 256 B 对齐，块内按 align 上调
+        if (!chunks_.empty()) {
+            Chunk& c = chunks_.back();
+            const std::size_t o = (c.used + align - 1) & ~(align - 1);
+            if (o + bytes <= c.size) {
+                c.used = o + bytes;
+                total_used_ += bytes;
+                return c.base + o;
+            }
+        }
+        std::size_t sz = bytes + align;
+        if (sz < kChunkBytes) sz = kChunkBytes;
+        NOVA_REQUIRE(total_alloc_ + sz <= budget_ + kChunkBytes);
+        if (std::getenv("NOVA_ARENA_DEBUG")) {
+            std::printf("[arena] +chunk %.1f MiB (累计已分配 %.1f / 预算 %.1f MiB)\n",
+                        (double)sz / 1048576.0, (double)(total_alloc_ + sz) / 1048576.0,
+                        (double)budget_ / 1048576.0);
+        }
+        Chunk c{};
+        c.size = sz;
+        NOVA_CU(cudaMalloc(&c.base, sz));
+        NOVA_REQUIRE(c.base != nullptr);
+        c.used = bytes;                        // 从块首开始，天然对齐
+        chunks_.push_back(c);
+        total_alloc_ += sz;
+        total_used_ += bytes;
+        return c.base;
     }
 
     template <class T>
     T* alloc(std::size_t count) { return static_cast<T*>(alloc(count * sizeof(T), 256)); }
 
-    std::size_t used() const { return off_; }
-    std::size_t cap()  const { return cap_; }
-    char* base() const { return base_; }
+    std::size_t used() const { return total_used_; }      // 真实占用（各块用量之和）
+    std::size_t cap()  const { return budget_; }          // 预算
+    std::size_t reserved() const { return total_alloc_; } // 实际向驱动要到的量
+    char* base() const { return chunks_.empty() ? nullptr : chunks_.front().base; }
 
 private:
-    char*       base_ = nullptr;
-    std::size_t cap_  = 0;
-    std::size_t off_  = 0;
+    struct Chunk {
+        char*       base = nullptr;
+        std::size_t size = 0;
+        std::size_t used = 0;
+    };
+    std::vector<Chunk> chunks_;
+    std::size_t budget_      = 0;
+    std::size_t total_alloc_ = 0;
+    std::size_t total_used_  = 0;
 };
 
 } // namespace nova

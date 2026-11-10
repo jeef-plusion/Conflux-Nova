@@ -50,7 +50,9 @@ inline std::int64_t now_ns() {
 struct Rec {
     std::string name;
     Phase       phase = Phase::Compute;
-    std::int64_t submit_ns = 0;    // host 侧提交时刻
+
+    std::int64_t submit_ns = 0;    // 报告时间轴上的"提交时刻"（CUDA 路径会等于 start_ns）
+    std::int64_t host_ns   = 0;    // host 侧真实提交时刻（永远来自 steady_clock）
     std::int64_t start_ns  = 0;    // device 侧开始（未解析时 = submit_ns）
     std::int64_t end_ns    = 0;    // device 侧结束（未解析时 = 解析后的墙钟）
     std::int64_t bytes     = 0;    // 这次 op 搬运/读取的字节数（权重字节 or 拷贝字节）
@@ -86,7 +88,8 @@ struct OpStat {
 };
 
 struct Summary {
-    double       wall_ns       = 0.0;   // 第一次 submit 到最后一 op 结束
+    double       wall_ns        = 0.0;   // 第一个 op 开始到最后一个 op 结束（设备时间轴）
+    double       host_span_ns   = 0.0;   // host 侧首末提交的跨度（队列深度代理）
     double       busy_ns       = 0.0;   // 所有 op 的 device 时间之和（= 串行队列下的占用）
     double       copy_ns       = 0.0;
     int          copy_count    = 0;
@@ -132,7 +135,8 @@ public:
         r.name = name;
         r.phase = ph;
         r.bytes = bytes;
-        r.submit_ns = now_ns();
+        r.host_ns = now_ns();        // host 时钟：只用来算"首末提交跨度"
+        r.submit_ns = r.host_ns;     // 报告时间轴上的提交时刻（CUDA 会在 resolve 里对齐到 start）
         r.start_ns = r.submit_ns;
         r.end_ns = r.submit_ns;
         r.tok = tok_;
@@ -164,13 +168,14 @@ public:
         Summary s;
         s.hw = hw_;
         std::map<std::string, OpStat> agg;
-        std::int64_t t0 = 0, t1 = 0;
+        std::int64_t t0 = 0, t1 = 0, h0 = 0, h1 = 0;
         bool first = true;
         int max_tok = 0;
         for (const auto& r : recs_) {
             const double d = r.dur_ns();
             if (r.tok > max_tok) max_tok = r.tok;
-            if (first) { t0 = r.submit_ns; first = false; }
+            if (first) { t0 = r.start_ns; h0 = r.host_ns; first = false; }
+            h1 = std::max(h1, r.host_ns);
             t1 = std::max(t1, r.end_ns);
             if (d <= 0.0 && r.phase != Phase::Copy) continue;
 
@@ -197,6 +202,8 @@ public:
             st.bytes += r.bytes;
             st.max_ns = std::max(st.max_ns, d);
         }
+
+        s.host_span_ns = (h1 > h0) ? static_cast<double>(h1 - h0) : 0.0;
         s.wall_ns = (t1 > t0) ? static_cast<double>(t1 - t0) : 0.0;
         s.tokens = (max_tok + 1 > 0) ? (max_tok + 1) : 1;
         for (auto& kv : agg) s.ops.push_back(kv.second);

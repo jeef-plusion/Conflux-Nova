@@ -1,6 +1,6 @@
 // nova_v2/model.h — 权重共享只读；工作区 + KV + Stream 按会话隔离
 #pragma once
-#include <cstdint>
+
 #include <string>
 #include <vector>
 #include <cuda_runtime.h>
@@ -9,6 +9,7 @@
 #include "nova/memory/arena.h"
 #include "graph/kv_pool.h"
 #include "graph/kv_pool_cfg.h"   // kKvBlock：块池寻址的唯一真源
+#include "model/sycl/scope_core.h"   // NovaScope 统计核心（纯 C++，CUDA/SYCL 共用）
 
 namespace nova {
 
@@ -19,13 +20,56 @@ struct Profiler {
     cudaEvent_t e0{}, e1{};
     double      acc[PH_COUNT] = {0};
     int         cur = -1;
+
+    // ---- NovaScope ----
+    // scoped=true 时走非阻塞路径：begin/end 只记录事件对，最后 NovaScope::resolve_all()
+    // 统一算时长。老路径（scoped=false）保持原样（每段同步 + 累加 acc），供原有基准使用。
+    bool        scoped = false;
+    std::size_t sc_idx = 0;          // 当前这条在 Scope::recs() 里的下标
+
     void init() { cudaEventCreate(&e0); cudaEventCreate(&e1); }
-    void begin(int p) { if (!on) return; cur = p; cudaEventRecord(e0); }
+
+    void begin(int p) { begin(p, nullptr, 0); }
+
+    // name/bytes 只有 scoped 时用得上；为空则回退成阶段名
+    void begin(int p, const char* name, std::int64_t bytes) {
+        if (scoped) {
+            auto& s = nova::scope::Scope::get();
+            sc_idx = s.recs().size();
+            s.begin(name ? name : phase_tag(p), nova::scope::Phase::Compute, bytes);
+            cur = p;
+            return;
+        }
+        if (!on) return;
+        cur = p;
+        cudaEventRecord(e0);
+    }
+
     void end() {
+        if (scoped) {
+            if (cur < 0) return;
+            auto& s = nova::scope::Scope::get();
+            s.finish(s.recs()[sc_idx]);     // host 侧兜底时长（resolve 时会用事件覆盖）
+            cur = -1;
+            return;
+        }
         if (!on || cur < 0) return;
         cudaEventRecord(e1); cudaEventSynchronize(e1);
         float ms = 0.f; cudaEventElapsedTime(&ms, e0, e1);
         acc[cur] += ms; cur = -1;
+    }
+
+    static const char* phase_tag(int p) {
+        switch (p) {
+            case PH_EMBED: return "embed";
+            case PH_NORM:  return "norm";
+            case PH_MM:    return "mm";
+            case PH_ATTN:  return "attn";
+            case PH_ROPE:  return "rope";
+            case PH_ELEM:  return "elem";
+            case PH_HEAD:  return "head";
+            default:       return "op";
+        }
     }
 };
 

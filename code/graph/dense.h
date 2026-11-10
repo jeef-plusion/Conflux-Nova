@@ -10,6 +10,11 @@
 namespace nova {
 namespace graph {
 
+// Q4_K 权重字节：每 256 个权重一个 144 B 的 super-block（NovaScope 用它算带宽）
+inline constexpr std::int64_t KB4(std::int64_t rows, std::int64_t cols) {
+    return rows * (cols / 256) * 144;
+}
+
 // 执行一层所需的全部上下文：本会话 workspace + 本层权重 + 共享 KV 块池 + 本会话块表
 struct LayerCtx {
     Workspace&     w;
@@ -33,7 +38,7 @@ struct LayerCtx {
 // attention 前的 rms_norm + 量化
 struct AttnNormOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_NORM);
+        c.prof.begin(PH_NORM, "rmsnorm.attn", (std::int64_t)Kernel::D * 4);
         Kernel::rms_norm(c.w.h, c.w.x, c.lw.attn_norm, c.n, c.w.s);
         Kernel::quant(c.A, c.w.h, c.n, c.w.s);
         c.prof.end();
@@ -43,7 +48,7 @@ struct AttnNormOp {
 // q / k / v 三投影（Q4_K：单列走 GEMV，多列走 MMQ）
 struct QkvProjOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_MM);
+        c.prof.begin(PH_MM, "gemv.q", KB4(c.lw.q.rows, c.lw.q.cols));
         Kernel::q_proj_n(c.lw.q, c.A, c.w.qb, c.n, c.w.s);
         Kernel::k_proj_n(c.lw.k, c.A, c.w.kb, c.n, c.w.s);
         Kernel::v_proj_n(c.lw.v, c.A, c.w.vb, c.n, c.w.s);
@@ -57,7 +62,7 @@ template <class Spec>
 struct QkvBiasOp {
     static void run(LayerCtx& c) {
         if constexpr (Spec::has_qkv_bias) {
-            c.prof.begin(PH_ELEM);
+            c.prof.begin(PH_ELEM, "bias.qkv", 0);
             Kernel::bias(c.w.qb, c.lw.qb, c.n * Spec::NH * Spec::HD, Spec::NH * Spec::HD, c.w.s);
             Kernel::bias(c.w.kb, c.lw.kb, c.n * Spec::NKV * Spec::HD, Spec::NKV * Spec::HD, c.w.s);
             Kernel::bias(c.w.vb, c.lw.vb, c.n * Spec::NKV * Spec::HD, Spec::NKV * Spec::HD, c.w.s);
@@ -69,7 +74,7 @@ struct QkvBiasOp {
 // RoPE（布局在 kernel 里由 ArchTraits::kRope 编译期选定）+ KV 落盘
 struct RopeKvOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_ROPE);
+        c.prof.begin(PH_ROPE, "rope+kv_store", (std::int64_t)c.n * Kernel::NKV * Kernel::HD * 2 * 4);
         Kernel::rope_batch(c.w.qb, c.w.kb, c.n, c.pos0, c.rcs, c.rsn, c.w.s);
         Kernel::kv_store_paged(c.pool_k, c.pool_v, c.table, c.layer, c.nb,
                                c.n, c.pos0, c.w.kb, c.w.vb, c.w.s);
@@ -80,7 +85,7 @@ struct RopeKvOp {
 // attention：单列走 decode 内核，多列走 prefill（n 是本次列数，不是架构差异）
 struct AttnOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_ATTN);
+        c.prof.begin(PH_ATTN, "attn_decode", (std::int64_t)(c.pos0 + 1) * Kernel::NKV * Kernel::HD * 2 * 4);
         if (c.n == 1) Kernel::attn_decode_paged(c.w.qb, c.pool_k, c.pool_v, c.table, c.layer, c.nb,
                                                 (int)c.pos0 + 1, c.w.ab, c.w.attn_scratch, c.w.s);
         else          Kernel::attn_prefill_paged(c.w.qb, c.pool_k, c.pool_v, c.table, c.layer, c.nb,
@@ -92,7 +97,7 @@ struct AttnOp {
 // o 投影前的量化 + o 投影
 struct OProjOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_MM);
+        c.prof.begin(PH_MM, "o_proj", KB4(c.lw.o.rows, c.lw.o.cols));
         Kernel::quant(c.A, c.w.ab, c.n, c.w.s);
         Kernel::o_proj_n(c.lw.o, c.A, c.w.db, c.n, c.w.s);
         c.prof.end();
@@ -102,7 +107,7 @@ struct OProjOp {
 // 残差（attention 之后 / FFN 之后各一次，同一个算子）
 struct ResidOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_ELEM);
+        c.prof.begin(PH_ELEM, "residual", (std::int64_t)Kernel::D * 2 * 4);
         Kernel::residual(c.w.x, c.w.db, c.n * Kernel::D, c.w.s);
         c.prof.end();
     }
@@ -111,7 +116,7 @@ struct ResidOp {
 // FFN 前的 rms_norm + 量化
 struct FfnNormOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_NORM);
+        c.prof.begin(PH_NORM, "rmsnorm.ffn", (std::int64_t)Kernel::D * 4);
         Kernel::rms_norm(c.w.h, c.w.x, c.lw.ffn_norm, c.n, c.w.s);
         Kernel::quant(c.A, c.w.h, c.n, c.w.s);
         c.prof.end();
@@ -121,7 +126,7 @@ struct FfnNormOp {
 // gate / up
 struct GateUpOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_MM);
+        c.prof.begin(PH_MM, "gemv.gate", KB4(c.lw.gate.rows, c.lw.gate.cols));
         Kernel::gate_n(c.lw.gate, c.A, c.w.gb, c.n, c.w.s);
         Kernel::up_n(c.lw.up, c.A, c.w.ub, c.n, c.w.s);
         c.prof.end();
@@ -131,7 +136,7 @@ struct GateUpOp {
 // swiglu：gate 原地写回，同时量化成 FFN 宽激活
 struct SwiGluOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_ELEM);
+        c.prof.begin(PH_ELEM, "swiglu", (std::int64_t)Kernel::FFN * 4);
         Kernel::swiglu_ffn(c.A2, c.w.gb, c.w.gb, c.w.ub, c.n, c.w.s);
         c.prof.end();
     }
@@ -140,7 +145,7 @@ struct SwiGluOp {
 // down
 struct DownOp {
     static void run(LayerCtx& c) {
-        c.prof.begin(PH_MM);
+        c.prof.begin(PH_MM, "gemv.down", KB4(c.lw.down.rows, c.lw.down.cols));
         Kernel::down_n(c.lw.down, c.A2, c.w.db, c.n, c.w.s);
         c.prof.end();
     }

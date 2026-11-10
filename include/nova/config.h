@@ -23,7 +23,11 @@ inline constexpr int kGroupsPerBlk = 8;    // 8 个 32-元素子块
 inline constexpr int kCtx             = 4096;   // RoPE 表长度
 inline constexpr int kMaxCtx          = 2048;   // 单会话上下文上限
 inline constexpr int kMaxSessions     = 4;      // 并发会话数（KV 预先切好）
-inline constexpr int kSessCtx         = 512;
+#ifndef NOVA_SESS_CTX
+inline constexpr int kSessCtx     = 512;
+#else
+inline constexpr int kSessCtx     = NOVA_SESS_CTX;
+#endif
 // 采样参数（greedy 会复读，必须带温度）
 inline constexpr int   kTopK = 40;
 inline constexpr float kTopP = 0.95f;
