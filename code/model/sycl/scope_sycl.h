@@ -57,8 +57,18 @@ void op(const char* name, Phase ph, std::int64_t bytes, sycl::queue& q, F&& fn) 
     const std::size_t idx = s.recs().size();
     s.begin(name, ph, bytes);
     fn();
-    sycl::event ev = q.ext_oneapi_submit_barrier();
-    pendings().push_back(Pending{idx, ev});
+    // 有的后端不支持 ext_oneapi_submit_barrier，会抛异常；探针不能把主程序带崩。
+    try {
+        sycl::event ev = q.ext_oneapi_submit_barrier();
+        pendings().push_back(Pending{idx, ev});
+    } catch (const std::exception& e) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::printf("[scope] submit_barrier 不可用（%s）：本次只有 host 时间\n", e.what());
+        }
+        s.finish(s.recs()[idx]);
+    }
 }
 
 // 拷贝：把 memcpy 返回的 event 交进来（H2D / D2H / D2D 都用它）
@@ -90,35 +100,39 @@ inline void resolve_all(sycl::queue& q) {
     idxs.reserve(pendings().size());
 
     for (auto& p : pendings()) {
-        std::int64_t e = 0;
+        std::int64_t st = 0, en = 0;
         try {
-            e = static_cast<std::int64_t>(
+            st = static_cast<std::int64_t>(
+                p.ev.get_profiling_info<sycl::info::event_profiling::command_start>());
+            en = static_cast<std::int64_t>(
                 p.ev.get_profiling_info<sycl::info::event_profiling::command_end>());
         } catch (...) {
-            e = 0;   // 队列没开 profiling：保持 host 时间，不编数
+            st = 0; en = 0;   // 队列没开 profiling：保持 host 时间，不编数
         }
-        ends.push_back(e);
+        // 真 bug（被 probe_trace.json 抓到）：以前只取 end，再把它和 host 提交时刻相减，
+        // 两个时钟（steady_clock vs GPU 单调时钟）混用 -> ts 变成负数、gap 变成 -5e14。
+        // 现在 start/end 都取设备时钟，report 时间轴整体落在 GPU 时钟域里；
+        // submit_ns 跟着对齐到 start（gap 恒 0，不再编造跨时钟差值）。
+        const std::int64_t d = (st != 0 && en >= st) ? (en - st) : 0;
+        if (d > 0) {
+            Rec& r = s.recs()[p.idx];
+            r.start_ns = st;
+            r.end_ns = en;
+            r.submit_ns = st;
+            r.resolved = true;
+        }
+        ends.push_back(d > 0 ? st : 0);
         idxs.push_back(p.idx);
     }
 
-    std::int64_t prev_end = 0;
+    // 兜底：连 command_start 都拿不到的记录，退化成 host 时间（至少不出现负数/乱序）
     for (std::size_t k = 0; k < ends.size(); ++k) {
         Rec& r = s.recs()[idxs[k]];
-        const std::int64_t e = ends[k];
-        if (e == 0) {                 // 拿不到事件时间 -> 保留 host 侧时间
-            r.resolved = true;
-            prev_end = 0;
-            continue;
-        }
-        if (prev_end == 0) {
-            r.start_ns = r.submit_ns; // 第一个边界：从提交算起
-            r.end_ns   = e;
-        } else {
-            r.start_ns = prev_end;    // 串行队列：上一个边界结束就是本 op 开始
-            r.end_ns   = e;
-        }
+        if (r.resolved) continue;
+        if (r.start_ns == 0) r.start_ns = r.host_ns;
+        if (r.end_ns <= r.start_ns) r.end_ns = r.start_ns + 1;   // 保证 dur > 0，便于画图
+        r.submit_ns = r.start_ns;
         r.resolved = true;
-        prev_end = e;
     }
     pendings().clear();
 }

@@ -74,15 +74,16 @@ void usage() {
         "  --warmup <n>      生成前的预热次数（默认 2）\n"
         "  --template <t>    chatml | r1 | none | auto（默认 auto：按词表探测）\n"
         "  --sample          走 top-k/top-p/temp 采样（默认 greedy，可复现）\n"
-        "  --scope           打开 NovaScope：记录每个算子/拷贝的 device 时间，
-"
-        "                    跑完打印四组统计并写出 nova_trace.json / .csv
-");
+        "  --scope           打开 NovaScope：记录每个算子/拷贝的 device 时间，\n"
+        "                    跑完打印四组统计并写出 nova_trace.json / .csv\n");
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
+    // 无缓冲：带探针时如果崩在某个 SYCL 调用里，前面已经打印的步骤才不会丢
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::printf("[e2e] 启动\n");
     std::string gguf   = "build/q4k_15b.gguf";
     std::string prompt = "你好";
     int  n_gen    = 32;

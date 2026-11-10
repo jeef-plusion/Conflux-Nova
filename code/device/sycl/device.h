@@ -161,6 +161,7 @@ private:
     sycl::device  dev_;
     sycl::context ctx_;
     sycl::queue   q_;
+    bool          profiling_ = false;   // 队列是否带 enable_profiling（NovaScope 用）
     DeviceCaps    caps_{};
 
     std::uint64_t reserved_ = 0;

@@ -190,9 +190,22 @@ Device::Device() {
     //   NOVA_SCOPE=1 -> 带 enable_profiling（每次发射多一点驱动开销，只给诊断跑）
     //   默认          -> 不带（性能测量走这条，避免探针本身影响数字）
     if (::nova::scope::wanted()) {
-        q_ = sycl::queue(ctx_, dev_, sycl::property::queue::in_order{},
-                         sycl::property::queue::enable_profiling{});
-        std::printf("[nova][sycl] NovaScope: 队列已开启 profiling（kernel 起止时间可读）\n");
+        // 注意 1：queue(ctx, dev, prop1, prop2) 这种四参形式 DPC++ 不认（这里踩过），
+        //         必须把属性打包成一个 property_list。
+        // 注意 2：有的后端不支持 enable_profiling，会抛 sycl::exception。探针绝不能
+        //         把主程序带崩 —— 失败就退回普通队列，并明确告诉用户"没有设备时间"。
+        try {
+            const sycl::property_list props{sycl::property::queue::in_order{},
+                                            sycl::property::queue::enable_profiling{}};
+            q_ = sycl::queue(ctx_, dev_, props);
+            profiling_ = true;
+            std::printf("[nova][sycl] NovaScope: 队列已开启 profiling（kernel 起止时间可读）\n");
+        } catch (const std::exception& e) {
+            q_ = sycl::queue(ctx_, dev_, sycl::property::queue::in_order{});
+            ::nova::scope::Scope::get().enable(false);   // 没有设备时间就别假装有
+            std::printf("[nova][sycl] NovaScope: enable_profiling 不可用（%s），"
+                        "退回普通队列；本次只有 host 侧统计\n", e.what());
+        }
     } else {
         q_ = sycl::queue(ctx_, dev_, sycl::property::queue::in_order{});
     }
