@@ -28,7 +28,7 @@ using namespace syclk;
 
 // 一层的权重：7 个 Q4_K 矩阵 + 5 个 fp32 向量（两个 norm、q/k/v 的 bias）
 struct LayerW {
-    syclb::ChunkedWeight q, k, v, o, gate, up, down;
+    syclb::ChunkedWeight qkv, o, gate, up, down;   // q/k/v 在加载时拼成一块（QKV 融合）
     float* qb        = nullptr;
     float* kb        = nullptr;
     float* vb        = nullptr;
@@ -64,6 +64,8 @@ public:
 private:
     void load_weights(const nova::GgufFile& g);
     void load_q4k(syclb::ChunkedWeight& w, const nova::GgufFile& g, const std::string& name, int rows, int cols);
+    // QKV 融合：把 attn_q/k/v 三个 Q4_K 张量按行拼成一块 [kQKV + 2*kKV, kD]
+    void load_qkv(syclb::ChunkedWeight& w, const nova::GgufFile& g, const std::string& prefix);
     void load_f32(float*& dst, const nova::GgufFile& g, const std::string& name, int n);
 
     void embed(int t);
@@ -88,6 +90,7 @@ private:
     float* qb_    = nullptr;
     float* kb_    = nullptr;
     float* vb_    = nullptr;
+    float* qkv_out_ = nullptr;   // 融合投影输出（q/k/v 三个指针都指进这块，零拷贝切分）
     float* ab_    = nullptr;
     float* gb_    = nullptr;
     float* ub_    = nullptr;

@@ -76,9 +76,11 @@ E2ERunner::E2ERunner(const std::string& gguf_path, int ctx_max) : q_(dev_.q()) {
     const std::uint64_t f32 = 4;
     x_     = static_cast<float*>(dev_.alloc(std::uint64_t(kD) * f32,          syclb::MemTag::Act, "e2e.x"));
     h_     = static_cast<float*>(dev_.alloc(std::uint64_t(kD) * f32,          syclb::MemTag::Act, "e2e.h"));
-    qb_    = static_cast<float*>(dev_.alloc(std::uint64_t(kQKV) * f32,        syclb::MemTag::Act, "e2e.q"));
-    kb_    = static_cast<float*>(dev_.alloc(std::uint64_t(kKV) * f32,         syclb::MemTag::Act, "e2e.k"));
-    vb_    = static_cast<float*>(dev_.alloc(std::uint64_t(kKV) * f32,         syclb::MemTag::Act, "e2e.v"));
+    // QKV 融合：一次 GEMV 出 2048 维，q/k/v 直接按偏移指进去（零拷贝切分）
+    qkv_out_ = static_cast<float*>(dev_.alloc(std::uint64_t(kQKV + 2 * kKV) * f32, syclb::MemTag::Act, "e2e.qkv"));
+    qb_ = qkv_out_;
+    kb_ = qkv_out_ + kQKV;
+    vb_ = qkv_out_ + kQKV + kKV;
     ab_    = static_cast<float*>(dev_.alloc(std::uint64_t(kQKV) * f32,        syclb::MemTag::Act, "e2e.ao"));
     gb_    = static_cast<float*>(dev_.alloc(std::uint64_t(kFFN) * f32,        syclb::MemTag::Act, "e2e.g"));
     ub_    = static_cast<float*>(dev_.alloc(std::uint64_t(kFFN) * f32,        syclb::MemTag::Act, "e2e.u"));
@@ -116,7 +118,7 @@ E2ERunner::E2ERunner(const std::string& gguf_path, int ctx_max) : q_(dev_.q()) {
 E2ERunner::~E2ERunner() {
     // 进程退出时由 Device 的记账负责报告；这里只把 ChunkedWeight 还回去
     for (auto& l : lw_) {
-        l.q.destroy(dev_); l.k.destroy(dev_); l.v.destroy(dev_); l.o.destroy(dev_);
+        l.qkv.destroy(dev_); l.o.destroy(dev_);
         l.gate.destroy(dev_); l.up.destroy(dev_); l.down.destroy(dev_);
     }
     emb_.destroy(dev_);
@@ -148,6 +150,39 @@ void E2ERunner::load_q4k(syclb::ChunkedWeight& w, const GgufFile& g, const std::
     w.create(dev_, rows, row_bytes, name.c_str());
     w.upload(dev_, host.data());
     weight_bytes_ += static_cast<std::int64_t>(host.size());
+}
+
+// QKV 融合加载：三个 Q4_K 张量按行写进同一块设备权重。
+// 为什么能直接拼：attn_q/k/v 都是 [rows, kD]，行字节数完全相同（kD/256*144），
+// 拼接后就是 [kQKV + 2*kKV, kD] 的同一个矩阵，一次 GEMV 就能算完。
+void E2ERunner::load_qkv(syclb::ChunkedWeight& w, const GgufFile& g, const std::string& prefix) {
+    struct Part { const char* name; int rows; };
+    const Part parts[3] = {{"attn_q.weight", kQKV}, {"attn_k.weight", kKV}, {"attn_v.weight", kKV}};
+    const std::int64_t row_bytes = static_cast<std::int64_t>(kD / kQK) * kBlockBytes;
+    const int total_rows = kQKV + 2 * kKV;
+
+    w.create(dev_, total_rows, row_bytes, "blk.qkv");
+    if (w.n_chunks() != 1) {           // 一块才保证 base() 连续，按偏移写入才成立
+        NOVA_ABORT("runner: qkv 融合权重必须落在单个 chunk 里");
+    }
+    std::uint8_t* base = const_cast<std::uint8_t*>(w.base());
+    std::int64_t off = 0;
+    for (const Part& pt : parts) {
+        const std::string name = prefix + pt.name;
+        const TensorInfo* ti = g.find(name);
+        if (ti == nullptr) {
+            char m[256];
+            std::snprintf(m, sizeof(m), "runner: GGUF 里没有张量 %s", name.c_str());
+            NOVA_ABORT(m);
+        }
+        if (ti->type != GgmlType::Q4_K) { NOVA_ABORT("runner: qkv 张量不是 Q4_K"); }
+        const std::int64_t bytes = row_bytes * pt.rows;
+        if (static_cast<std::int64_t>(ti->bytes) != bytes) { NOVA_ABORT("runner: qkv 张量尺寸不符"); }
+        std::vector<std::uint8_t> host = read_tensor(g, *ti);
+        dev_.upload(base + off, host.data(), static_cast<std::uint64_t>(bytes));
+        off += bytes;
+        weight_bytes_ += bytes;
+    }
 }
 
 void E2ERunner::load_f32(float*& dst, const GgufFile& g, const std::string& name, int n) {
@@ -186,9 +221,7 @@ void E2ERunner::load_weights(const GgufFile& g) {
     for (int l = 0; l < kL; ++l) {
         const std::string p = "blk." + std::to_string(l) + ".";
         LayerW& w = lw_[static_cast<std::size_t>(l)];
-        load_q4k(w.q,    g, p + "attn_q.weight",      kQKV, kD);
-        load_q4k(w.k,    g, p + "attn_k.weight",      kKV,  kD);
-        load_q4k(w.v,    g, p + "attn_v.weight",      kKV,  kD);
+    load_qkv(w.qkv, g, p);   // attn_q/k/v 拼成一块 [kQKV + 2*kKV, kD]
         load_q4k(w.o,    g, p + "attn_output.weight", kD,   kQKV);
         load_q4k(w.gate, g, p + "ffn_gate.weight",    kFFN, kD);
         load_q4k(w.up,   g, p + "ffn_up.weight",      kFFN, kD);
@@ -226,9 +259,7 @@ void E2ERunner::layer(int l, int pos0) {
     // 每个 op 都包在 NOVA_SCOPED 里：关掉 NovaScope 时它只是 `__VA_ARGS__;`（零开销），
     // 打开时记录 name/bytes 并提交一个队列边界事件。bytes 用 ChunkedWeight::bytes()，
     // 也就是这个算子真正要读的权重字节数 —— 带宽就是这么算出来的。
-    const std::int64_t bq = static_cast<std::int64_t>(w.q.bytes());
-    const std::int64_t bk = static_cast<std::int64_t>(w.k.bytes());
-    const std::int64_t bv = static_cast<std::int64_t>(w.v.bytes());
+    const std::int64_t bqkv = static_cast<std::int64_t>(w.qkv.bytes());
     const std::int64_t bo = static_cast<std::int64_t>(w.o.bytes());
     const std::int64_t bg = static_cast<std::int64_t>(w.gate.bytes());
     const std::int64_t bu = static_cast<std::int64_t>(w.up.bytes());
@@ -238,9 +269,8 @@ void E2ERunner::layer(int l, int pos0) {
     NOVA_SCOPED("rmsnorm_quant", static_cast<std::int64_t>(2 * kD * 4), rmsnorm_quant(h_, A_, x_, w.attn_norm, 1, q_));
 
     // 2) q / k / v 三投影（Q4_K x int8 GEMV）
-    NOVA_SCOPED("gemv.q", bq, gemv<kD, true>(w.q, A_, qb_, q_));
-    NOVA_SCOPED("gemv.k", bk, gemv<kD, true>(w.k, A_, kb_, q_));
-    NOVA_SCOPED("gemv.v", bv, gemv<kD, true>(w.v, A_, vb_, q_));
+    // QKV 融合：一次发射算完 q+k+v（2048 行），结果按偏移切给 qb_/kb_/vb_
+    NOVA_SCOPED("gemv.qkv", bqkv, gemv<kD, true>(w.qkv, A_, qkv_out_, q_));
 
     // 3) bias（Qwen2 系有）
     if (Model::qkv_bias) {
