@@ -51,6 +51,50 @@ struct DeepSeekV2Lite {
     // 第 0 层是 dense FFN，其余 26 层是 MoE
     static constexpr int kDenseFFNLayers = 1;
 
+    // ---------------------------------------------------------------------
+    // 以下是 2026-11-10 从真实 GGUF 头（mradermacher/DeepSeek-V2-Lite-GGUF，
+    // Q4_K_M，9.65 GB）里逐张量核对出来的，**不再是猜的**：
+    //
+    //   output.weight           Q6_K  ne=[2048, 102400]      <- 词表，untied
+    //   token_embd.weight       Q4_K  ne=[2048, 102400]
+    //   blk.N.attn_q.weight     Q4_K  ne=[2048, 3072]        = NH*(128+64)
+    //   blk.N.attn_kv_a_mqa     Q4_K  ne=[2048, 576]         = kv_lora(512) + k_rope(64)
+    //   blk.N.attn_kv_a_norm    F32   ne=[512]               <- 512 维隐向量上的 RMSNorm
+    //   blk.N.attn_kv_b         Q4_K  ne=[512, 4096]         = NH*(128+128)
+    //   blk.N.attn_output       Q4_K  ne=[2048, 2048]
+    //   blk.0.ffn_gate/up       Q4_K  ne=[2048, 10944]
+    //   blk.0.ffn_down          Q8_0  ne=[10944, 2048]       <- 行宽 10944，只能 Q8_0
+    //   blk.N.ffn_gate/up_exps  Q4_K  ne=[2048, 1408, 64]    <- 行宽 2048，可以 Q4_K
+    //   blk.N.ffn_down_exps     Q8_0  ne=[1408, 2048, 64]    <- 行宽 1408，只能 Q8_0
+    //   blk.N.ffn_gate_inp      F32   ne=[2048, 64]          <- 路由矩阵（fp32）
+    //   blk.N.ffn_gate/up_shexp Q4_K  ne=[2048, 2816]        <- 2 个 shared 融合成 2816
+    //   blk.N.ffn_down_shexp    Q6_K  ne=[2816, 2048]
+    //
+    // 三条修正（原 spec 里没有、写 MLA/MoE 时也没想到）：
+    //   1. **kv_a_norm**：kv_a 输出的前 512 维要先过 RMSNorm，才能喂 kv_b；
+    //   2. **shared expert 是融合的**：一个 2816 宽的 FFN，不是两个 1408；
+    //   3. **down 投影是 Q8_0、output 是 Q6_K**：Q4_K 装不下 10944/1408 的行宽
+    //      （不是 pad，是换量化类型）。所以引擎要跑 V2-Lite，必须补 **Q8_0 + Q6_K 的 GEMV**。
+    // ---------------------------------------------------------------------
+    static constexpr int kSharedFFN     = kExpertFFN * kNShared;   // 2816（GGUF 里就是这么存的）
+    static constexpr bool kKVANorm      = true;                   // kv_a 的 512 维要先做 RMSNorm
+    static constexpr float kExpertScale  = 1.0f;                  // GGUF 里 expert_weights_scale
+
+    // 真实 GGUF 里每个张量的量化类型（用于校验 loader 有没有补 Q8_0/Q6_K）
+    enum class QT { F32, Q4_K, Q6_K, Q8_0 };
+    static constexpr QT kQTOutput     = QT::Q6_K;
+    static constexpr QT kQTEmbed      = QT::Q4_K;
+    static constexpr QT kQTAttnQ      = QT::Q4_K;
+    static constexpr QT kQTAttnKVA    = QT::Q4_K;
+    static constexpr QT kQTAttnKVB    = QT::Q4_K;
+    static constexpr QT kQTAttnO      = QT::Q4_K;
+    static constexpr QT kQTDenseGate  = QT::Q4_K;
+    static constexpr QT kQTDenseDown  = QT::Q8_0;    // 行宽 10944
+    static constexpr QT kQTExpGate    = QT::Q4_K;
+    static constexpr QT kQTExpDown    = QT::Q8_0;    // 行宽 1408
+    static constexpr QT kQTSharedUp   = QT::Q4_K;
+    static constexpr QT kQTSharedDown = QT::Q6_K;
+
     // ---- 编译期约束（改常量时先把这里过一遍）----
     //
     // 注意：**V2-Lite 的两个 FFN 宽度都不是 256 的倍数**

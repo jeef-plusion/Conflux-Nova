@@ -86,25 +86,61 @@ V3 的 group-limited routing 不涉及。
 
 ## 5. 两件硬约束（不解决就装不下 V2-Lite）
 
-### 5.1 FFN 宽度不是 256 的倍数 → Q4_K 表示不了
+### 5.1 FFN / down 投影的行宽不是 256 的倍数 → Q4_K 表示不了
 
-| 张量 | 宽度 | 256 整除 | 32 整除 |
+| 张量 | 行宽（ne[0]） | 256 整除 | 真实 GGUF 用的类型 |
 |---|---:|---|---|
-| dense FFN（第 0 层） | 10944 | ✗（42.75） | ✓ |
-| expert FFN | 1408 | ✗（5.5） | ✓ |
-| hidden / kv_lora | 2048 / 512 | ✓ | ✓ |
+| `attn_q` | 2048 | ✓ | Q4_K |
+| `attn_kv_a_mqa` | 2048 | ✓ | Q4_K |
+| `attn_kv_b` | 512 | ✓ | Q4_K |
+| `ffn_gate/up`（含 exps，行数为 10944/1408×64） | 2048 | ✓ | Q4_K |
+| **`ffn_down`**（第 0 层） | **10944** | ✗（42.75） | **Q8_0** |
+| **`ffn_down_exps`** | **1408** | ✗（5.5） | **Q8_0** |
+| `ffn_down_shexp` | 2816 | ✓（11） | Q6_K |
+| `output.weight` | 2048 | ✓ | Q6_K |
 
-Q4_K 的一个 super-block 是 **256** 个元素，行宽必须是 256 的倍数。所以：
-**现有「只支持 Q4_K」的引擎装不下这两个张量**。两条路：
-(a) 给这两个张量加 Q4_0 / Q5_0 / F16 支持（32 元素一块，两者都整除 32）；
-(b) 把行宽 pad 到 256 的倍数（浪费 3%~12% 带宽，且 GGUF 没这种布局，得自己重排）。
-`deepseek_v2_lite.h` 里已经把这件事写成 `kFFN256Aligned/kExp256Aligned = false` 的常量，别当笔误。
+结论（不是推断，是从 GGUF 头里读出来的）：**上游不是靠 pad 解决，而是把 down 投影换成 Q8_0。**
+所以引擎要跑 V2-Lite，缺的是 **Q8_0 与 Q6_K 的 GEMV**（两个 32 元素一块的格式，行宽只要 32 对齐），
+而不是"pad 到 256"。这也意味着 `gemv<>` 不能只认 Q4_K，得做成量化类型可模板化。
 
 ### 5.2 权重 9.0 GB > 8 GiB 设备预算
 
-按 16B 参数 × 0.5625 B/参数（Q4_K）估算 ≈ 9.0 GB，超过 `profile::kDeviceBudget = 8 GiB`，
-而且单次分配上限只有 4 GB（已按 1 GiB 切块，够用）。真要跑，权重必须**按层流式**：每层 334 MB 左右，
-一层的 7~9 个张量在算这一层前预取。这是 runner 里最重的一块工程量。
+Q4_K_M 整包 **9.65 GB**，超过 `profile::kDeviceBudget = 8 GiB`，单次分配上限 4 GB（已按 1 GiB 切块）。
+真要跑，权重必须**按层流式**：每层 ~350 MB，算这一层前预取。这是 runner 里最重的一块工程量。
+
+---
+
+## 5.5 真实 GGUF 的逐张量布局（2026-11-10 核对）
+
+来源：`mradermacher/DeepSeek-V2-Lite-GGUF` 的 `Q4_K_M`（9.65 GB，377 个张量，45 个 KV）。
+只下了前 32 MB 的头就拿到了全部张量表 —— 这也是"没有完整文件也能做前期工作"的示范。
+
+```
+output.weight           Q6_K  ne=[2048, 102400]
+token_embd.weight       Q4_K  ne=[2048, 102400]
+blk.N.attn_norm.weight  F32   ne=[2048]
+blk.N.attn_q.weight     Q4_K  ne=[2048, 3072]     = 16 head × (128 nope + 64 rope)
+blk.N.attn_kv_a_mqa     Q4_K  ne=[2048, 576]      = kv_lora 512 + k_rope 64
+blk.N.attn_kv_a_norm    F32   ne=[512]            ← 512 维隐向量上的 RMSNorm（原 spec 漏了）
+blk.N.attn_kv_b         Q4_K  ne=[512, 4096]      = 16 head × (128 k_nope + 128 v)
+blk.N.attn_output       Q4_K  ne=[2048, 2048]
+blk.0.ffn_gate/up       Q4_K  ne=[2048, 10944]
+blk.0.ffn_down          Q8_0  ne=[10944, 2048]
+blk.N.ffn_gate_inp      F32   ne=[2048, 64]       ← 路由矩阵（fp32，64 个 expert）
+blk.N.ffn_gate/up_exps  Q4_K  ne=[2048, 1408, 64]
+blk.N.ffn_down_exps     Q8_0  ne=[1408, 2048, 64]
+blk.N.ffn_gate/up_shexp Q4_K  ne=[2048, 2816]     ← 2 个 shared 融合成 2816
+blk.N.ffn_down_shexp    Q6_K  ne=[2816, 2048]
+```
+
+三条对设计的修正（已写进 `deepseek_v2_lite.h` 的注释）：
+
+1. **kv_a_norm**：`kv_a` 输出的前 512 维必须先做 RMSNorm，才能进 `kv_b`；
+2. **shared expert 是融合的**：一个 2816 宽的 FFN，不是两个 1408；
+3. **down 投影是 Q8_0、output 是 Q6_K**：见 §5.1。
+
+KV 相关元数据：`expert_count=64`、`expert_used_count=6`、`expert_shared_count=2`、
+`leading_dense_block_count=1`、`expert_weights_scale` —— 与 spec 完全一致。
 
 ---
 
