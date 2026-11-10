@@ -54,15 +54,15 @@ void skip_value(std::ifstream& f, GgufType t) {
 uint64_t ggml_type_bytes(GgmlType t, const std::vector<uint64_t>& ne) {
     uint64_t n = 1;
     for (uint64_t d : ne) n *= d;
-    switch (t) {
-        case GgmlType::F32:  return n * 4;
-        case GgmlType::F16:  return n * 2;
-        case GgmlType::Q8_0: return (n / 32) * 34;
-        case GgmlType::Q4_K: return (n / 256) * 144;
-        case GgmlType::Q6_K: return (n / 256) * 210;
+    const uint32_t be = ggml_type_block_elems(t);
+    const uint32_t bb = ggml_type_block_bytes(t);
+    if (be == 0 || bb == 0 || n % be != 0) {
+        char m[192];
+        std::snprintf(m, sizeof(m), "tensor 元素数 %llu 与类型 block(%u elems, %u B) 不整除",
+                      static_cast<unsigned long long>(n), be, bb);
+        NOVA_ABORT(m);
     }
-    NOVA_ABORT("unknown tensor type");
-    return 0;
+    return (n / be) * bb;
 }
 
 GgufFile::GgufFile(const std::string& path) : path_(path) {

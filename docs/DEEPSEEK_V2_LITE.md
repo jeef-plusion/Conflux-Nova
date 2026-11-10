@@ -153,6 +153,39 @@ build\sycl_dsv2_host_check.exe
 
 只要 MSVC，不需要 GPU、不需要模型文件。**这条命令就是「V2-Lite 的算子对不对」的唯一答案。**
 
+### 6.1 文件到手后：loader 已经能读它了（2026-11-10）
+
+拿到真文件（`D:\dsv2\DeepSeek-V2-Lite.Q4_K_M.gguf`，9.65 GiB）之后补了两件事：
+
+| 改动 | 内容 |
+|---|---|
+| `loader/gguf.h` + `gguf.cpp` | `GmlType` 补 Q4_0/Q4_1/Q5_0/Q5_1（原来只认 Q4_K/Q6_K/Q8_0/F16/F32 → **遇到 Q5_0 直接 abort**）；`ggml_type_bytes` 改成按 block(元素数, 字节数) 统一算，并检查整除 |
+| `quant/ggml_blocks.h` | Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q6_K 的块结构与反量化（32 元素一块，Q6_K 是 256） |
+| `tools/quant_dump.cpp` | 读真文件：类型直方图、每类型抽一行反量化打统计、位打包自检 |
+
+实测（`quant_dump.exe D:\dsv2\DeepSeek-V2-Lite.Q4_K_M.gguf`）：
+
+```
+tensors= 377   data_offset = 3996384   file_size = 10364416736
+类型直方图: F32×108  Q5_0×14  Q8_0×13  Q4_K×229  Q6_K×13
+张量总字节 = 9.65 GiB（与文件大小吻合，元数据 ~4 MB）
+
+按类型抽样（第 0 行）：
+  Q6_K  output.weight        cols=2048   sd 0.12447
+  Q4_K  token_embd.weight    cols=2048   sd 0.06623
+  Q8_0  blk.0.ffn_down       cols=10944  sd 0.03260
+  Q5_0  blk.3.ffn_down_exps  cols=1408   sd 0.02960   ← 数量级全部合理
+
+位打包自检: Q8_0 / Q5_0 / Q4_0 反量化 max_abs_err 0.000e+00  PASS
+```
+
+> 注意：位打包自检证明「q 塞进块里能原样取回来」，**不证明与 ggml 逐位一致**。
+> 逐位一致要等有 llama.cpp 的 CPU 参考时再验（TODO 记在 §7）。
+
+---
+
+## 7. 还差什么（按依赖顺序）
+
 ---
 
 ## 7. 与文件下载的关系
