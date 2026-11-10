@@ -20,6 +20,7 @@
 #include "map/qwen2.5/tokenizer.h"
 #include "nova/loader/gguf.h"
 #include "runner.h"
+#include "model/sycl/scope_sycl.h"
 
 namespace {
 
@@ -72,7 +73,11 @@ void usage() {
         "  --ctx    <n>      KV 逻辑长度（默认 512）\n"
         "  --warmup <n>      生成前的预热次数（默认 2）\n"
         "  --template <t>    chatml | r1 | none | auto（默认 auto：按词表探测）\n"
-        "  --sample          走 top-k/top-p/temp 采样（默认 greedy，可复现）\n");
+        "  --sample          走 top-k/top-p/temp 采样（默认 greedy，可复现）\n"
+        "  --scope           打开 NovaScope：记录每个算子/拷贝的 device 时间，
+"
+        "                    跑完打印四组统计并写出 nova_trace.json / .csv
+");
 }
 
 } // namespace
@@ -84,6 +89,7 @@ int main(int argc, char** argv) {
     int  ctx      = 512;
     int  warmup   = 2;
     bool greedy   = true;
+    bool want_scope = false;   // --scope：开 NovaScope，把 10 token 的 trace 写出来
     Tpl  tpl      = Tpl::Auto;
 
     for (int i = 1; i < argc; ++i) {
@@ -106,6 +112,7 @@ int main(int argc, char** argv) {
             else tpl = Tpl::Auto;
         }
         else if (s == "--sample")   greedy = false;
+        else if (s == "--scope")    want_scope = true;
         else if (s == "-h" || s == "--help") { usage(); return 0; }
         else { std::printf("[e2e] 未知参数: %s\n", s.c_str()); usage(); return 1; }
     }
@@ -135,6 +142,12 @@ int main(int argc, char** argv) {
     if (ids.size() > 16) std::printf("...");
     std::printf("\n");
 
+    // ---- NovaScope：必须在 runner（以及它的 Device 队列）构造之前打开 ----
+    if (want_scope) {
+        ::nova::scope::Scope::get().enable(true);
+        std::printf("[scope] 已开启：每个算子的 device 时间来自 SYCL profiling 事件\n");
+    }
+
     // ---- runner ----
     nova::sycls::E2ERunner runner(gguf, ctx);
     std::printf("[e2e] 权重 %.1f MiB，ctx=%d\n",
@@ -163,8 +176,21 @@ int main(int argc, char** argv) {
         out.push_back(next);
         if (i + 1 == n_gen) break;                       // 最后一个不需要再前进一步
         const auto t0 = Clock::now();
+        ::nova::scope::Scope::get().set_token(i);
         next = runner.step(next, static_cast<int>(ids.size()) + i, greedy);
         t_gen += secs(t0, Clock::now());
+    }
+
+    // ---- NovaScope 收尾：把边界事件换算成区间，打印四组统计并落盘 ----
+    if (want_scope) {
+        ::nova::scope::Scope::get().set_token(-1);
+        ::nova::scope::resolve_all(runner.device().q());
+        ::nova::scope::Scope::get().print_report(stdout);
+        const bool okj = ::nova::scope::Scope::get().write_trace("nova_trace.json");
+        const bool okc = ::nova::scope::Scope::get().write_csv("nova_trace.csv");
+        std::printf("\n[scope] trace: %s (nova_trace.json) | %s (nova_trace.csv)\n",
+                    okj ? "ok" : "FAILED", okc ? "ok" : "FAILED");
+        std::printf("[scope] 打开方式: chrome://tracing 或 https://ui.perfetto.dev 拖入 nova_trace.json\n");
     }
 
     const double per_tok = t_gen / std::max(1, n_gen - 1);

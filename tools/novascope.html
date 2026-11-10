@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>NovaScope · 数据交通图</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --line:#1f2734; --txt:#d7dee9; --dim:#7d8798;
+    --ok:#38d39f; --warn:#f2c14e; --bad:#ff5a5f; --host:#6ea8fe; --bus:#b48ead; --gpu:#38d39f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:13px/1.5 "Segoe UI",system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0d121b}
+  header h1{font-size:16px;margin:0;letter-spacing:.5px}
+  header .tag{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:99px;padding:2px 8px}
+  header .spacer{flex:1}
+  #drop{border:1px dashed var(--line);border-radius:8px;padding:6px 10px;color:var(--dim);cursor:pointer}
+  #drop.hot{border-color:var(--ok);color:var(--ok)}
+  .wrap{display:grid;grid-template-columns:1fr 340px;gap:14px;padding:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h2{margin:0;padding:9px 12px;font-size:12px;letter-spacing:.6px;color:var(--dim);border-bottom:1px solid var(--line);font-weight:600}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:12px}
+  .kpi{background:#0e131d;border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  .kpi .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+  .kpi .k{font-size:11px;color:var(--dim)}
+  .kpi.bad .v{color:var(--bad)} .kpi.warn .v{color:var(--warn)} .kpi.ok .v{color:var(--ok)}
+  canvas{display:block;width:100%}
+  #lanes{height:290px}
+  #timeline{height:120px}
+  .legend{display:flex;gap:14px;padding:8px 12px;color:var(--dim);font-size:11px;border-top:1px solid var(--line)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{padding:6px 10px;text-align:right;border-bottom:1px solid #171e29}
+  th:nth-child(1),td:nth-child(1){text-align:left}
+  th{color:var(--dim);font-weight:600;font-size:11px}
+  .bar{height:6px;border-radius:3px;background:#1b2331;position:relative;overflow:hidden}
+  .bar>i{position:absolute;left:0;top:0;bottom:0;background:var(--gpu);border-radius:3px}
+  .verdict{padding:10px 12px;font-size:12px;border-top:1px solid var(--line)}
+  .verdict .row{display:flex;gap:8px;align-items:flex-start;margin:4px 0}
+  .pill{font-size:10px;border-radius:99px;padding:1px 7px;font-weight:700}
+  .pill.ok{background:rgba(56,211,159,.15);color:var(--ok)}
+  .pill.warn{background:rgba(242,193,78,.15);color:var(--warn)}
+  .pill.bad{background:rgba(255,90,95,.15);color:var(--bad)}
+  .mono{font-family:Consolas,ui-monospace,monospace}
+  footer{padding:8px 18px;color:var(--dim);font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>NovaScope</h1><span class="tag">数据交通图 · 谁在偷懒一目了然</span>
+  <span class="spacer"></span>
+  <label id="drop">拖入 nova_trace.json（或点击选择）<input id="file" type="file" accept=".json" hidden></label>
+  <span class="tag" id="src">演示流</span>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="card">
+      <h2>三级流水线 · HOST → BUS → COMPUTE</h2>
+      <canvas id="lanes"></canvas>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--host)"></i>Host 下发</span>
+        <span><i class="dot" style="background:var(--bus)"></i>总线搬运（粒子=拷贝）</span>
+        <span><i class="dot" style="background:var(--gpu)"></i>Compute 执行</span>
+        <span id="cong"></span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>时间线（整段 trace，按算子着色）</h2>
+      <canvas id="timeline"></canvas>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>关键指标</h2>
+      <div class="kpis" id="kpis"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Top 5 · 谁吃掉了 GPU 时间</h2>
+      <table id="top"></table>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>判读</h2>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+</div>
+
+<footer>数据来源：SYCL profiling 事件（kernel 起止）· 频率/温度/EU 占用若无外部采样器则显示 n/a，不编数。</footer>
+
+<script>
+// ---------------------------------------------------------------------------
+// 数据模型：与 scope_core.h 的 write_trace() 输出一一对应
+//   traceEvents: [{name,cat,ph:"X",ts,dur,pid,tid,args:{layer,tok,bytes,bw_gbs,gap_us}}]
+//                [{name:"layer_bytes",cat:"counter",ph:"C",ts,args:{tok,layer,bytes}}]
+// 也接受 {events:[...]} 和 {"traceEvents":[...]} 两种外壳
+// ---------------------------------------------------------------------------
+let TRACE = null;      // 原始事件
+let MODEL = null;      // 聚合后的视图模型
+const LANE = { HOST: 0, BUS: 1, GPU: 2 };
+
+function summarize(evs){
+  const xs = evs.filter(e => e.ph === 'X');
+  const copies = xs.filter(e => e.cat === 'copy');
+  const comp = xs.filter(e => e.cat !== 'copy');
+  const t0 = xs.length ? Math.min(...xs.map(e => e.ts)) : 0;
+  const t1 = xs.length ? Math.max(...xs.map(e => e.ts + e.dur)) : 1;
+  const wall = Math.max(1e-6, t1 - t0);
+  const busy = comp.reduce((a,e) => a + e.dur, 0);
+  const copyT = copies.reduce((a,e) => a + e.dur, 0);
+  const copyB = copies.reduce((a,e) => a + (e.args?.bytes||0), 0);
+  const weightB = comp.filter(e => e.cat === 'compute' || e.cat === 'other')
+                      .reduce((a,e) => a + (e.args?.bytes||0), 0);
+  const toks = new Set(xs.map(e => e.args?.tok).filter(v => typeof v === 'number' && v >= 0));
+  const ntok = Math.max(1, toks.size);
+  const byOp = new Map();
+  for (const e of comp){
+    const k = e.name; const o = byOp.get(k) || {name:k, n:0, us:0, bytes:0};
+    o.n++; o.us += e.dur; o.bytes += (e.args?.bytes||0); byOp.set(k, o);
+  }
+  const ops = [...byOp.values()].sort((a,b) => b.us - a.us);
+  const gaps = xs.filter(e => (e.args?.gap_us||0) > 50).length;
+  return {t0, t1, wall, busy, copyT, copyB, weightB, ntok, ops, gaps,
+          copies, comp, busyRatio: busy/wall, copyRatio: copyT/wall,
+          copyPerTok: copies.length/ntok, bytesPerTok: copyB/ntok,
+          gbs: weightB/(wall*1e-6)/1e9};
+}
+
+function loadTrace(json){
+  const evs = json.traceEvents || json.events || json;
+  if (!Array.isArray(evs)) throw new Error('没有 traceEvents 数组');
+  TRACE = evs; MODEL = summarize(evs); render();
+}
+
+// ---------------------------------------------------------------------------
+// 演示流：没有文件时自己造一段（27 层 × 14 算子 × N token），
+// 让打开页面就能看到粒子在动，方便先验收观感
+// ---------------------------------------------------------------------------
+function demoTrace(tokens){
+  const ops = [
+    ['rmsnorm_quant',6,36e3],['gemv.q',72,9e6],['gemv.k',20,1.1e6],['gemv.v',20,1.1e6],
+    ['bias.q',2,6e3],['rope',3,8e3],['kv_store',2,8e3],['attn_decode',9,8e3],
+    ['quant_rows',2,8e3],['gemv.o',25,2.2e6],['residual.attn',2,8e3],
+    ['rmsnorm_quant.ffn',6,36e3],['gemv.gate',25,3e6],['gemv.up',25,3e6],
+    ['swiglu',4,16e3],['gemv.down',38,4.5e6],['residual.ffn',2,8e3]
+  ];
+  const copies = [['H2D',12,4],['H2D',8,65536],['D2H',180,607744],['D2H',6,4096]];
+  const evs = []; let ts = 0;
+  for (let tk = 0; tk < tokens; tk++){
+    for (const c of copies){ evs.push({name:c[0],cat:'copy',ph:'X',ts,dur:c[1],pid:1,tid:1,args:{bytes:c[2],tok:tk,layer:-1,gap_us:3}}); ts += c[1]; }
+    for (let l = 0; l < 27; l++){
+      for (const o of ops){
+        evs.push({name:o[0],cat:'compute',ph:'X',ts,dur:o[1],pid:1,tid:0,args:{bytes:o[2],tok:tk,layer:l,gap_us:3}});
+        ts += o[1];
+      }
+    }
+  }
+  return {traceEvents: evs};
+}
+
+// ---------------------------------------------------------------------------
+// 渲染：KPI、Top5、判读
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+function fmt(n, d=2){ return n.toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d}); }
+
+function render(){
+  const m = MODEL;
+  const kpis = [
+    ['墙钟', fmt(m.wall/1000,2)+' ms', ''],
+    ['GPU 忙比', fmt(100*m.busyRatio,1)+'%', m.busyRatio < .7 ? 'bad' : (m.busyRatio < .9 ? 'warn' : 'ok')],
+    ['拷贝占比', fmt(100*m.copyRatio,1)+'%', m.copyRatio > .15 ? 'bad' : (m.copyRatio > .05 ? 'warn' : 'ok')],
+    ['有效带宽', fmt(m.gbs,1)+' GB/s', m.gbs < 20 ? 'bad' : (m.gbs < 35 ? 'warn' : 'ok')]
+  ];
+  $('kpis').innerHTML = kpis.map(k => `<div class="kpi ${k[2]}"><div class="v">${k[1]}</div><div class="k">${k[0]}</div></div>`).join('');
+
+  const maxUs = m.ops.length ? m.ops[0].us : 1;
+  $('top').innerHTML = '<tr><th>算子</th><th>次数</th><th>总 ms</th><th>占比</th><th>GB/s</th><th style="width:70px">占比条</th></tr>' +
+    m.ops.slice(0,5).map(o => `<tr>
+      <td class="mono">${o.name}</td><td>${o.n}</td><td>${fmt(o.us/1000,2)}</td>
+      <td>${fmt(100*o.us/m.busy,1)}%</td>
+      <td>${o.bytes ? fmt(o.bytes/(o.us*1e-6)/1e9,1) : '-'}</td>
+      <td><div class="bar"><i style="width:${Math.max(2,100*o.us/maxUs)}%"></i></div></td></tr>`).join('');
+
+  const v = [];
+  if (m.copyRatio > .15) v.push(['bad','数据搬运拥堵',`拷贝占墙钟 ${fmt(100*m.copyRatio,1)}% > 15%，总线在拖后腿`]);
+  else if (m.copyRatio > .05) v.push(['warn','搬运偏低',`拷贝占墙钟 ${fmt(100*m.copyRatio,1)}%，值得看一眼 Copy 泳道`]);
+  else v.push(['ok','搬运不是瓶颈',`拷贝只占 ${fmt(100*m.copyRatio,1)}%`]);
+
+  if (m.busyRatio < .7) v.push(['bad','算力空转',`GPU 忙比 ${fmt(100*m.busyRatio,1)}% < 70%，空隙要去排队气泡里找`]);
+  else if (m.busyRatio < .9) v.push(['warn','还有空隙',`GPU 忙比 ${fmt(100*m.busyRatio,1)}%，空闲 ${fmt(100*(1-m.busyRatio),1)}%`]);
+  else v.push(['ok','发射几乎无空隙',`GPU 忙比 ${fmt(100*m.busyRatio,1)}%`]);
+
+  if (m.copyPerTok > 200) v.push(['bad','拷贝触发率过高',`${fmt(m.copyPerTok,1)} 次/token（UMA 下重点查隐式拷贝）`]);
+  else v.push(['ok','拷贝触发率正常',`${fmt(m.copyPerTok,1)} 次/token，${fmt(m.bytesPerTok/1024,0)} KiB/token`]);
+
+  if (m.gaps > 0) v.push(['warn','有排队气泡',`${m.gaps} 次 submit→start > 50 µs`]);
+  v.push(['ok','频率/温度','无外部采样器时显示 n/a（不编数）']);
+
+  $('verdict').innerHTML = v.map(x => `<div class="row"><span class="pill ${x[0]}">${x[0].toUpperCase()}</span>
+      <div><b>${x[1]}</b><br><span style="color:var(--dim)">${x[2]}</span></div></div>`).join('');
+
+  const cong = [];
+  if (m.copyRatio > .15) cong.push('<span style="color:var(--bad)">● 总线：拥堵</span>');
+  else cong.push('<span style="color:var(--ok)">● 总线：通畅</span>');
+  if (m.busyRatio < .7) cong.push('<span style="color:var(--dim)">● 算力：空转</span>');
+  else cong.push('<span style="color:var(--ok)">● 算力：吃满</span>');
+  $('cong').innerHTML = cong.join(' ');
+
+  sizeCanvases(); renderTimeline(m); animate();
+}
+
+// ---------------------------------------------------------------------------
+// 交通图：三条泳道 + 拷贝粒子
+//   Host 道：每个 op 的下发时刻闪一下（submit 抖动）
+//   Bus 道：拷贝 = 粒子，粒子数 ∝ 次数，半径 ∝ sqrt(bytes)
+//   GPU 道：按时间把 op 铺成条块；空闲处留空 => 一眼看出谁在偷懒
+// ---------------------------------------------------------------------------
+function sizeCanvases(){
+  for (const id of ['lanes','timeline']){
+    const c = $(id); const r = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.floor(r.width*dpr)); c.height = Math.max(1, Math.floor(r.height*dpr));
+    c.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
+  }
+}
+
+let particles = [];
+function spawnParticles(m){
+  const rect = $('lanes').getBoundingClientRect();
+  const n = Math.min(120, Math.max(2, Math.round(m.copyPerTok*1.5)));
+  for (let i = 0; i < n; i++){
+    const c = m.copies[i % Math.max(1,m.copies.length)] || {args:{bytes:65536}};
+    particles.push({x:-10 - Math.random()*rect.width, y:0, r:2.2 + Math.sqrt((c.args?.bytes||1))/240,
+                    v:0.6 + Math.random()*0.9, a:0.35 + Math.random()*0.5});
+  }
+}
+
+let raf = 0;
+function animate(){
+  cancelAnimationFrame(raf);
+  const c = $('lanes'), ctx = c.getContext('2d');
+  const W = c.clientWidth, H = c.clientHeight;
+  const laneY = [H*0.22, H*0.5, H*0.78];
+  const m = MODEL;
+  if (particles.length === 0) spawnParticles(m);
+
+  const gpuColor = m.busyRatio < .7 ? '#3a4252' : (m.busyRatio < .9 ? '#8a7a3a' : '#2f7f63');
+  const busColor = m.copyRatio > .15 ? '#ff5a5f' : (m.copyRatio > .05 ? '#f2c14e' : '#b48ead');
+
+  function frame(t){
+    ctx.clearRect(0,0,W,H);
+
+    // 泳道底
+    for (let i = 0; i < 3; i++){
+      ctx.fillStyle = i === LANE.GPU ? 'rgba(56,211,159,0.04)' : 'rgba(255,255,255,0.02)';
+      ctx.fillRect(0, laneY[i]-16, W, 32);
+      ctx.strokeStyle = '#1b2331'; ctx.beginPath();
+      ctx.moveTo(0, laneY[i]+16); ctx.lineTo(W, laneY[i]+16); ctx.stroke();
+    }
+    // 标签
+    ctx.font = '11px Segoe UI, system-ui'; ctx.fillStyle = '#7d8798';
+    ctx.fillText('HOST  · 下发', 10, laneY[LANE.HOST]-24);
+    ctx.fillText('BUS   · 拷贝', 10, laneY[LANE.BUS]-24);
+    ctx.fillText('COMPUTE · 执行', 10, laneY[LANE.GPU]-24);
+
+    // GPU 道：按时间铺条块（用百分比宽度模拟一次循环）
+    const span = Math.max(2e6, m.wall);
+    let cursor = 0;
+    ctx.fillStyle = gpuColor;
+    for (const o of m.ops.slice(0, 40)){
+      const w = Math.max(1, (o.us/span) * W * 0.9);
+      ctx.fillRect(cursor, laneY[LANE.GPU]-11, w, 22);
+      cursor += w;
+      if (cursor > W) break;
+    }
+
+    // Host 道：闪烁的下发脉冲
+    const pulse = 0.4 + 0.6*Math.abs(Math.sin(t/380));
+    ctx.fillStyle = `rgba(110,168,254,${pulse})`;
+    for (let i = 0; i < Math.min(60, m.ops.length); i++){
+      const x = (i/60)*W;
+      ctx.fillRect(x, laneY[LANE.HOST]-2, 2, 4);
+    }
+
+    // Bus 道：粒子流
+    ctx.save();
+    for (const p of particles){
+      p.x += p.v;
+      if (p.x > W+12){ p.x = -12 - Math.random()*80; }
+      ctx.beginPath();
+      ctx.fillStyle = busColor;
+      ctx.globalAlpha = p.a;
+      ctx.arc(p.x, laneY[LANE.BUS] + Math.sin((p.x+p.y)/40)*5, p.r, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore(); ctx.globalAlpha = 1;
+
+    // 连接线：Bus -> GPU，表示"搬完就喂给算力"
+    ctx.strokeStyle = 'rgba(180,142,173,0.18)'; ctx.setLineDash([4,6]);
+    for (let x = 20; x < W; x += 90){
+      ctx.beginPath(); ctx.moveTo(x, laneY[LANE.BUS]+16); ctx.lineTo(x+30, laneY[LANE.GPU]-16); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    raf = requestAnimationFrame(frame);
+  }
+  raf = requestAnimationFrame(frame);
+}
+
+function renderTimeline(m){
+  const c = $('timeline'), ctx = c.getContext('2d');
+  const W = c.clientWidth, H = c.clientHeight;
+  ctx.clearRect(0,0,W,H);
+  const span = Math.max(1e-6, m.wall);
+  const pad = 8;
+  // 每个 token 一行
+  const ntok = Math.max(1, m.ntok);
+  const rowH = Math.max(8, (H - 2*pad) / ntok);
+  const colors = ['#38d39f','#6ea8fe','#f2c14e','#b48ead','#e07a5f','#8ecae6'];
+  m.comp.forEach((e, i) => {
+    const tk = (e.args?.tok ?? 0);
+    const x = pad + ((e.ts - m.t0)/span)*(W - 2*pad);
+    const w = Math.max(0.6, (e.dur/span)*(W - 2*pad));
+    ctx.fillStyle = colors[Math.abs(hashStr(e.name)) % colors.length];
+    ctx.globalAlpha = .85;
+    ctx.fillRect(x, pad + tk*rowH, w, Math.max(2, rowH-2));
+  });
+  m.copies.forEach(e => {
+    const x = pad + ((e.ts - m.t0)/span)*(W - 2*pad);
+    const w = Math.max(0.8, (e.dur/span)*(W - 2*pad));
+    ctx.globalAlpha = 1; ctx.fillStyle = '#ff5a5f';
+    ctx.fillRect(x, H - pad - 3, w, 3);
+  });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#7d8798'; ctx.font = '11px Segoe UI, system-ui';
+  ctx.fillText('每行 = 一个 token；底部红线 = 拷贝', pad, 12);
+}
+
+function hashStr(s){ let h = 0; for (let i = 0; i < s.length; i++) h = (h*31 + s.charCodeAt(i))|0; return h; }
+
+// ---------------------------------------------------------------------------
+// 数据入口：拖文件 / 选择文件 / WebSocket
+// ---------------------------------------------------------------------------
+const drop = $('drop'), fileIn = $('file');
+drop.addEventListener('click', () => fileIn.click());
+fileIn.addEventListener('change', () => { if (fileIn.files[0]) readFile(fileIn.files[0]); });
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) readFile(f); });
+
+function readFile(f){
+  const r = new FileReader();
+  r.onload = () => {
+    try { loadTrace(JSON.parse(r.result)); $('src').textContent = f.name; }
+    catch (err){ alert('解析失败：' + err.message); }
+  };
+  r.readAsText(f);
+}
+
+// WebSocket：连不上就安静地退回演示流
+(function ws(){
+  let sock = null;
+  try { sock = new WebSocket('ws://localhost:8787'); } catch (e) { return; }
+  sock.onmessage = ev => {
+    try { const j = JSON.parse(ev.data); loadTrace(j); $('src').textContent = 'WebSocket · 实时'; }
+    catch (e) {}
+  };
+  sock.onerror = () => {};
+})();
+
+// 启动：先演示流
+loadTrace(demoTrace(2));
+window.addEventListener('resize', () => { sizeCanvases(); if (MODEL) renderTimeline(MODEL); });
+</script>
+</body>
+</html>

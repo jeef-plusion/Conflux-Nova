@@ -1,5 +1,6 @@
 // nova_v2/code/device/sycl/device.cpp — 设备层实现
 #include "device.h"
+#include "model/sycl/scope_sycl.h"     // NovaScope：H2D/D2H 记账、profiling 队列开关
 
 #include <cinttypes>
 #include <cstring>
@@ -183,7 +184,18 @@ Device::Device() {
 
     ctx_ = sycl::context(dev_);
     // 单流顺序队列：与 CUDA 的 stream 语义一一对应，算子之间不需要显式 event 依赖。
-    q_ = sycl::queue(ctx_, dev_, sycl::property::queue::in_order{});
+    //
+    // NovaScope（诊断工具）需要 event::get_profiling_info 才能拿到 kernel 的
+    // device start/end；那是队列属性，不能事后加。所以这里按开关建两种队列：
+    //   NOVA_SCOPE=1 -> 带 enable_profiling（每次发射多一点驱动开销，只给诊断跑）
+    //   默认          -> 不带（性能测量走这条，避免探针本身影响数字）
+    if (::nova::scope::wanted()) {
+        q_ = sycl::queue(ctx_, dev_, sycl::property::queue::in_order{},
+                         sycl::property::queue::enable_profiling{});
+        std::printf("[nova][sycl] NovaScope: 队列已开启 profiling（kernel 起止时间可读）\n");
+    } else {
+        q_ = sycl::queue(ctx_, dev_, sycl::property::queue::in_order{});
+    }
 }
 
 Device::~Device() {
@@ -254,12 +266,22 @@ void Device::note_free(std::uint64_t bytes, MemTag tag) {
 }
 
 void Device::upload(void* dst, const void* src, std::uint64_t bytes) {
+    // NovaScope：H2D 记账（次数 + 字节 + 事件时间）。关掉时 note_copy 是空函数。
+    if (::nova::scope::Scope::get().enabled()) {
+        NOVA_SCOPED_COPY("H2D", static_cast<std::int64_t>(bytes), q_.memcpy(dst, src, bytes));
+        return;
+    }
     if (bytes == 0) return;
     q_.memcpy(dst, src, bytes);
     q_.wait_and_throw();
 }
 
 void Device::download(void* dst, const void* src, std::uint64_t bytes) {
+    // NovaScope：D2H 记账（logits 回传就是这里）
+    if (::nova::scope::Scope::get().enabled()) {
+        NOVA_SCOPED_COPY("D2H", static_cast<std::int64_t>(bytes), q_.memcpy(dst, src, bytes));
+        return;
+    }
     if (bytes == 0) return;
     q_.memcpy(dst, src, bytes);
     q_.wait_and_throw();

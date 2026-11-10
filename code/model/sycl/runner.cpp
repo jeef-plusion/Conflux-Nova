@@ -16,6 +16,7 @@
 
 #include "nova/config.h"
 #include "nova/quant/q4_k.h"
+#include "model/sycl/scope_sycl.h"     // NovaScope：NOVA_SCOPE=1 时记录每个算子的 device 时间
 
 namespace nova {
 namespace sycls {
@@ -211,66 +212,86 @@ void E2ERunner::check_ctx(int pos) const {
 }
 
 void E2ERunner::embed(int t) {
-    dev_.upload(ids_, &t, sizeof(int));
-    embed_rows(x_, emb_.base(), ids_, 1, q_);
+    ::nova::scope::Scope::get().set_layer(-1);
+    dev_.upload(ids_, &t, sizeof(int));          // H2D 4 B（NovaScope 会在 Device::upload 里记账）
+    NOVA_SCOPED("embed_rows", static_cast<std::int64_t>(kD) * 4, embed_rows(x_, emb_.base(), ids_, 1, q_));
 }
 
 // 一层的 12 个算子，顺序 = code/graph/qwen2.h 的 OpList
 void E2ERunner::layer(int l, int pos0) {
     const LayerW& w = lw_[static_cast<std::size_t>(l)];
     const std::int64_t kv_off = static_cast<std::int64_t>(l) * ctx_max_ * kKV;
+    ::nova::scope::Scope::get().set_layer(l);
+
+    // 每个 op 都包在 NOVA_SCOPED 里：关掉 NovaScope 时它只是 `__VA_ARGS__;`（零开销），
+    // 打开时记录 name/bytes 并提交一个队列边界事件。bytes 用 ChunkedWeight::bytes()，
+    // 也就是这个算子真正要读的权重字节数 —— 带宽就是这么算出来的。
+    const std::int64_t bq = static_cast<std::int64_t>(w.q.bytes());
+    const std::int64_t bk = static_cast<std::int64_t>(w.k.bytes());
+    const std::int64_t bv = static_cast<std::int64_t>(w.v.bytes());
+    const std::int64_t bo = static_cast<std::int64_t>(w.o.bytes());
+    const std::int64_t bg = static_cast<std::int64_t>(w.gate.bytes());
+    const std::int64_t bu = static_cast<std::int64_t>(w.up.bytes());
+    const std::int64_t bd = static_cast<std::int64_t>(w.down.bytes());
 
     // 1) rms_norm(x, attn_norm) + quant  -> A
-    rmsnorm_quant(h_, A_, x_, w.attn_norm, 1, q_);
+    NOVA_SCOPED("rmsnorm_quant", static_cast<std::int64_t>(2 * kD * 4), rmsnorm_quant(h_, A_, x_, w.attn_norm, 1, q_));
 
     // 2) q / k / v 三投影（Q4_K x int8 GEMV）
-    gemv<kD, true>(w.q, A_, qb_, q_);
-    gemv<kD, true>(w.k, A_, kb_, q_);
-    gemv<kD, true>(w.v, A_, vb_, q_);
+    NOVA_SCOPED("gemv.q", bq, gemv<kD, true>(w.q, A_, qb_, q_));
+    NOVA_SCOPED("gemv.k", bk, gemv<kD, true>(w.k, A_, kb_, q_));
+    NOVA_SCOPED("gemv.v", bv, gemv<kD, true>(w.v, A_, vb_, q_));
 
     // 3) bias（Qwen2 系有）
     if (Model::qkv_bias) {
-        bias_add(qb_, w.qb, kQKV, kQKV, q_);
-        bias_add(kb_, w.kb, kKV,  kKV,  q_);
-        bias_add(vb_, w.vb, kKV,  kKV,  q_);
+        NOVA_SCOPED("bias.q", static_cast<std::int64_t>(kQKV * 4), bias_add(qb_, w.qb, kQKV, kQKV, q_));
+        NOVA_SCOPED("bias.k", static_cast<std::int64_t>(kKV * 4), bias_add(kb_, w.kb, kKV,  kKV,  q_));
+        NOVA_SCOPED("bias.v", static_cast<std::int64_t>(kKV * 4), bias_add(vb_, w.vb, kKV,  kKV,  q_));
     }
 
     // 4) RoPE + KV 落盘
-    rope_apply(qb_, kb_, pos0, cs_, sn_, q_);
-    kv_store(kvk_ + kv_off, kvv_ + kv_off, kb_, vb_, 1, pos0, q_);
+    NOVA_SCOPED("rope", static_cast<std::int64_t>(kQKV * 4), rope_apply(qb_, kb_, pos0, cs_, sn_, q_));
+    NOVA_SCOPED("kv_store", static_cast<std::int64_t>(kKV * 2 * 4), kv_store(kvk_ + kv_off, kvv_ + kv_off, kb_, vb_, 1, pos0, q_));
 
     // 5) attention（decode：n_past 与 CUDA 版同义，KV 里已有 pos0+1 个位置）
-    attn_decode(qb_, kvk_ + kv_off, kvv_ + kv_off, ab_, pos0, scratch_, q_);
+    //    bytes = 这一层 KV cache 里被读到的字节（随 pos 增长，带宽才有意义）
+    NOVA_SCOPED("attn_decode", static_cast<std::int64_t>(pos0 + 1) * kKV * 2 * 4,
+                attn_decode(qb_, kvk_ + kv_off, kvv_ + kv_off, ab_, pos0, scratch_, q_));
 
     // 6) quant(attn_out) + o 投影
-    quant_rows<kD>(A_, ab_, 1, q_);
-    gemv<kD, true>(w.o, A_, db_, q_);
+    NOVA_SCOPED("quant_rows", static_cast<std::int64_t>(kD * 4), quant_rows<kD>(A_, ab_, 1, q_));
+    NOVA_SCOPED("gemv.o", bo, gemv<kD, true>(w.o, A_, db_, q_));
 
     // 7) 残差
-    residual_add(x_, db_, kD, q_);
+    NOVA_SCOPED("residual.attn", static_cast<std::int64_t>(kD * 2 * 4), residual_add(x_, db_, kD, q_));
 
     // 8) rms_norm(x, ffn_norm) + quant
-    rmsnorm_quant(h_, A_, x_, w.ffn_norm, 1, q_);
+    NOVA_SCOPED("rmsnorm_quant.ffn", static_cast<std::int64_t>(2 * kD * 4), rmsnorm_quant(h_, A_, x_, w.ffn_norm, 1, q_));
 
     // 9) gate / up
-    gemv<kD, true>(w.gate, A_, gb_, q_);
-    gemv<kD, true>(w.up,   A_, ub_, q_);
+    NOVA_SCOPED("gemv.gate", bg, gemv<kD, true>(w.gate, A_, gb_, q_));
+    NOVA_SCOPED("gemv.up",   bu, gemv<kD, true>(w.up,   A_, ub_, q_));
 
     // 10) swiglu(gate, up) -> gb 原地 + 量化成 FFN 宽激活 A2
-    swiglu_ffn(A2_, gb_, gb_, ub_, 1, q_);
+    NOVA_SCOPED("swiglu", static_cast<std::int64_t>(kFFN * 4), swiglu_ffn(A2_, gb_, gb_, ub_, 1, q_));
 
     // 11) down
-    gemv<kFFN, true>(w.down, A2_, db_, q_);
+    NOVA_SCOPED("gemv.down", bd, gemv<kFFN, true>(w.down, A2_, db_, q_));
 
     // 12) 残差
-    residual_add(x_, db_, kD, q_);
+    NOVA_SCOPED("residual.ffn", static_cast<std::int64_t>(kD * 2 * 4), residual_add(x_, db_, kD, q_));
 }
 
 void E2ERunner::head() {
-    rms_norm(h_, x_, out_norm_, 1, q_);
-    quant_rows<kD>(A_, h_, 1, q_);
-    if (tied_) gemv<kD, true>(emb_,  A_, logits_, q_);
-    else       gemv<kD, true>(outw_, A_, logits_, q_);
+    ::nova::scope::Scope::get().set_layer(-1);
+    NOVA_SCOPED("rms_norm.head", static_cast<std::int64_t>(kD) * 4, rms_norm(h_, x_, out_norm_, 1, q_));
+    NOVA_SCOPED("quant_rows.head", static_cast<std::int64_t>(kD) * 4, quant_rows<kD>(A_, h_, 1, q_));
+    // 词表投影：这一发的权重字节就是整个输出矩阵（tie 时复用 embedding）
+    if (tied_) {
+        NOVA_SCOPED("gemv.head", static_cast<std::int64_t>(emb_.bytes()), gemv<kD, true>(emb_,  A_, logits_, q_));
+    } else {
+        NOVA_SCOPED("gemv.head", static_cast<std::int64_t>(outw_.bytes()), gemv<kD, true>(outw_, A_, logits_, q_));
+    }
 }
 
 int E2ERunner::sample(bool greedy) {
