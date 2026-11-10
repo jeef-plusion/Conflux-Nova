@@ -316,3 +316,53 @@ VMM 本身可用、虚拟地址能保留 4.5 GiB，但 `cuMemCreate` 要的物�
    （不用 CUDA IPC，因为 Windows 不支持）。每 token 多几次 14 KB 的往返，代价很小。
 2. 换一张不在 WDDM 桌面合成器下的卡（TCC / 计算卡 / Linux），预算问题本身消失。
 3. 7B 的 Q2_K（约 2.7 GB）仍然超预算，所以"降量化"救不了，只能走 1 或 2。
+---
+
+## 9. D3D12 图形预算实验：前提成立，但三条路都封死（2026-11-10 17:40）
+
+POC：`tools/d3d12_steal.cu`（无头 D3D12 设备 + `CreateSharedHandle` + `cuImportExternalMemory`）。
+
+### 9.1 两本账确实是分开的（用户的前提成立）
+
+```
+DXGI LOCAL budget   9.22 GiB | usage 0.14 GiB | available 9.08 GiB
+CUDA   配额         约 2 GiB 就被挡住（见 §7.5 / §8.1）
+```
+
+图形账本报出 **9.22 GiB** 预算，而 CUDA 那本账在同一时刻只肯给约 2 GiB。前提没问题。
+
+### 9.2 但图形账本"报得出、给不出"
+
+| 申请 | 结果 |
+|---|---|
+| 1.0 GiB D3D12 DEFAULT 堆（SHARED + UAV + SIMULTANEOUS_ACCESS） | **成功** |
+| 2.0 GiB | `0x8007000E` = **E_OUTOFMEMORY** |
+| 3.0 GiB | `E_OUTOFMEMORY` |
+| 4.5 GiB | `0x887A0005` = **DXGI_ERROR_DEVICE_REMOVED**（驱动重置） |
+
+也就是说：那 9.22 GiB 是**预算数字**，不是这个远程/无头会话里真能分配出来的量。
+更糟的是 4.5 GiB 那一次直接把设备打掉了 —— 正是之前导致远程黑屏的 TDR。
+**所以我在第一次设备移除之后就停止了 2 GiB 以上的扫描**，不再拿你的显示器冒险。
+
+### 9.3 CUDA 侧根本接不上
+
+- CUDA 12.8 **没有** `cudaGraphicsD3D12RegisterResource`，也没有 `cuda_d3d12_interop.h`
+  （11.8 同样没有）。运行时 API 的 D3D12 互操作在这个工具链里不存在。
+- 驱动层 `cuImportExternalMemory(CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE)` 对
+  `CreateSharedHandle` 出来的句柄返回 **1 = invalid argument**，即使已经用了
+  `D3D12_HEAP_FLAG_SHARED` + `ALLOW_SIMULTANEOUS_ACCESS` + `CUDA_EXTERNAL_MEMORY_DEDICATED`。
+
+### 9.4 结论
+
+四条"偷显存"的路线全部实测封死：
+
+| 路线 | 结果 |
+|---|---|
+| 幽灵进程池（多 PID） | 预算**会话级共享**，第二个进程立刻 OOM（§8.1） |
+| CUDA IPC 跨进程导入 | Windows 上导出就失败（§8.2） |
+| VMM 虚拟地址重映射 | 能保留 4.5 GiB 虚拟地址，`cuMemCreate` 撞同一预算（§8.3） |
+| D3D12 图形预算 | 账本更大但给不出，2 GiB 就 E_OUTOFMEMORY，4.5 GiB 直接设备移除（§9.2） |
+
+**唯一还剩的真路是层并行多进程**：3 个进程各持 9 层（每层 ~160 MB，都在预算内），
+激活（3584 float = 14 KB）经**主机内存**中转（IPC 不可用，但 14 KB 的往返代价可忽略）。
+这是工程活，不是 hack。
