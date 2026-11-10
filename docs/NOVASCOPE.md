@@ -260,3 +260,59 @@ attn_decode 3.230 ms (4.8%) | bias.qkv 3.551 ms (5.2%)
 
 注：`bias.qkv`（3.55 ms/10 token，12.7 µs/次）和 `rmsnorm`（6.5 ms）的融合**还没做** ——
 它们合计占 14.6%，是下一步最划算的一刀（把 bias 写进 GEMV 尾巴、把 rmsnorm 与 quant 合并）。
+---
+
+## 8. 幽灵进程池 / VMM 重映射：三个实验的结论（2026-11-10 17:20）
+
+POC 在 `tools/ghost_pool.cu`（构建：`nvcc -arch=sm_61 -Xcompiler /utf-8 ... -lcuda`）。
+三个实验各自独立，结论如下。
+
+### 8.1 E1 幽灵进程：**配额不是按 PID 的，跨进程共享**
+
+```
+主进程先占 1.5 GB  →  OK（free 9.08 → 7.58）
+再拉 3 个子进程各要 1.5 GB  →  全部 out of memory
+```
+
+单独并行跑两个进程各要 1.5 GB（用 `--child` 模式，绕开主进程干扰）：
+
+```
+child 9 : cudaMalloc 1.5 GB -> OK      （free 9.08 → 7.58）
+child 10: cudaMalloc 1.5 GB -> out of memory   （此时物理显存仍有 9.08 GiB 空闲）
+```
+
+**一个拿到 1.5 GB，另一个立刻失败**，物理空闲 9 GiB。所以那个 ~2 GiB 的额度是
+**整个会话/整卡共享**的，不是每进程一份。多开进程堆不出更多可用显存。
+
+### 8.2 E2 CUDA IPC：Windows 上不可用
+
+```
+child: cudaIpcGetMemHandle -> out of memory
+```
+
+导出这一步就失败了（Windows 没有 POSIX 共享句柄那套）。即使子进程能持有显存，
+主进程也无法把它映射进自己的地址空间。**跨进程借显存在 Windows 上这条路是死的。**
+
+### 8.3 E3 VMM：能保留虚拟地址，但物理仍记同一份账
+
+```
+VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED = 1
+cuMemAddressReserve(4.5 GiB) -> 0  va=0x203A00000     （不占物理，free 不变）
+cuMemCreate 第 0 块 512 MiB   -> 失败（预算）
+```
+
+VMM 本身可用、虚拟地址能保留 4.5 GiB，但 `cuMemCreate` 要的物理块记在**同一份预算**上，
+所以拼不出 4.5 GiB。**VMM 只解决"地址连续"，不解决"显存不够"。**
+
+### 8.4 结论：7B 在这台机器上不可行，但有一条正路
+
+三条 hack 都被同一堵墙挡住：**整卡 ~2 GiB 的会话级预算**。7B（4.5 GiB）装不进去，
+任何分配 API、任何进程数都改变不了。
+
+真要跑 7B，只有三条路（按可行性排序）：
+
+1. **层并行多进程**（唯一能在本机实现的）：3 个进程各持 9 层（每层 ~160 MB），
+   每个进程都在预算内；激活（3584 float = 14 KB）通过**主机内存**在进程间传递
+   （不用 CUDA IPC，因为 Windows 不支持）。每 token 多几次 14 KB 的往返，代价很小。
+2. 换一张不在 WDDM 桌面合成器下的卡（TCC / 计算卡 / Linux），预算问题本身消失。
+3. 7B 的 Q2_K（约 2.7 GB）仍然超预算，所以"降量化"救不了，只能走 1 或 2。
