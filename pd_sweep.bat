@@ -3,6 +3,8 @@ rem pd_sweep.bat - build sycl_e2e with a given prefetch depth and measure per-op
 rem usage: pd_sweep.bat <PD>     (writes build\sycl\pd_<PD>.txt)
 setlocal
 set PD=%1
+rem 模型路径可以用第二个参数覆盖（模型挪过目录时不用改脚本）
+if "%2"=="" (set MODEL=C:\nova\build\q4k_15b.gguf) else (set MODEL=%2)
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" >nul 2>&1
 cd /d C:\nova
@@ -21,7 +23,7 @@ if errorlevel 1 goto fail
 
 if exist e2e_pd_%PD%.txt del e2e_pd_%PD%.txt
 set NOVA_SCOPE=1
-build\sycl\sycl_e2e_pd%PD%.exe --gguf C:\nova\build\q4k_15b.gguf --tokens 10 --warmup 2 --scope > e2e_pd_%PD%.txt 2>&1
+build\sycl\sycl_e2e_pd%PD%.exe --gguf %MODEL% --tokens 10 --warmup 2 --scope > e2e_pd_%PD%.txt 2>&1
 echo RUN_EXIT=%ERRORLEVEL%
 findstr /C:"ms/token" e2e_pd_%PD%.txt
 findstr /C:"gemv.down" /C:"gemv.up" /C:"gemv.gate" /C:"GPU" e2e_pd_%PD%.txt
