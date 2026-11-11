@@ -10,3 +10,7 @@ build/
 _*.bat
 clocks.csv
 startup.log
+
+# 发行包里的二进制不进 git（走 GitHub Releases / release\assemble.bat）
+/release/*.exe
+/release/*.dll

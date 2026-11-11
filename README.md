@@ -1,8 +1,37 @@
 # 🚀 Conflux Nova
 
+## Evolution · 演进史（V2.4.0）
+
+> 一条从"跑不起来"到"工业级"的曲线。所有数字都出自同一套测量协议，可复现。
+
+| 阶段 | GEMV 带宽 | 端到端 1.5B | 这一版到底做了什么 |
+|---|---:|---:|---|
+| V2.3.0-alpha | 14–18 GB/s | 未测 | 第一个能在 Intel Arc 上跑通的版本（数值正确，但带宽只有上限的 1/4） |
+| V2.3.0-beta | 36.8–38.8 GB/s | 35.54 tok/s | **修掉 quant 致命 bug**、方案 C 结案、测量协议重定、首次端到端 |
+| **V2.4.0** | **37–38 GB/s** | **36.32 tok/s** | SoA v2（块头 64 B 对齐 + 一次 64 B 载入）、QKV 融合、NovaScope 全链路诊断 |
+
+**同一颗 Arc 130T，顺序读上限实测 61.38 GB/s。** GEMV 从 14–18 走到 37–38（+113%），
+端到端从"没有数字"走到 36.32 tok/s。
+
+### 三条格言（都是踩出来的，不是写出来的）
+
+1. **测量协议比优化重要。**
+   那个 18 GB/s 的"基线"是假的：冷启动 + 5 次预热 + 三个进程并发。
+   真实稳态 36–38 GB/s。**先怀疑测量，再怀疑代码。**
+
+2. **流量账算对了，收益也可能是零。**
+   SoA 布局把每块流量从 192 B 削到 144 B（−25%），带宽只涨 3.4%。
+   因为瓶颈是指令发射，不是 DRAM。**别拿理论带宽当 KPI。**
+
+3. **不可能的前提，用一行代码就能验伪。**
+   `sycl::dp4a` 这个 API 根本不存在 —— 那条"硬件加速路径"写了几个月、从没编译过。
+   `-DNOVA_SYCL_DP4A=1` 一次编译就暴露了。**先验假设，再动手。**
+
+---
+
 ## 当前编译版本介绍
 
-**架构版本：Conflux Nova Neo 2.0.0-Core** ｜ **发行版本：FJEC_V2.2.0-Core**
+**架构版本：Conflux Nova Neo 2.0.0-Core** ｜ **发行版本：FJEC_V2.4.0**
 
 `FJEC_` ：来自作者的编译版本（From the Author's Compiled Build）。每一个官方发行的二进制都带这个前缀，用来和贡献者自己编译的版本区分。
 
@@ -10,8 +39,9 @@
 > - **CUDA（1080 Ti，本文主线）**：`code/` + `src/kernel/*.cu` + `build_core.bat`。
 > - **SYCL（Intel Arc 130T，旁支）**：`src/kernel/sycl/` + `code/device/sycl/` + `build_sycl*.bat`，
 >   与 CUDA 线**不共享任何源文件与宏**。状态、数字、坑都在 **[`docs/STATE.md`](docs/STATE.md)**：
->   算子层与 1.5B 端到端已跑通（实测 35.5 tok/s），DeepSeek-V2-Lite 的 MLA/MoE 算子已验完、
->   loader 能读混量化 GGUF，但还缺 Q5_0/Q8_0/Q6_K 的 GEMV 与按层流式加载。
+>   算子层与 1.5B 端到端已跑通（**实测 36.32 tok/s，GEMV 37–38 GB/s**）。
+>   想直接跑？下载发行包双击 `run_bench.bat` 即可 —— 见 **[`release/QUICKSTART.md`](release/QUICKSTART.md)**。
+>   目录边界（core / apps / novascope / bench）见 **[`docs/LAYOUT.md`](docs/LAYOUT.md)**。
 
 本文分两部分：**第一部分讲架构思想**（为什么这么设计），**第二部分讲这一版发行的优化**（它具体有什么、怎么用）。
 
