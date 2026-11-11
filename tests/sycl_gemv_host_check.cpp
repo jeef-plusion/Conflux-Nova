@@ -32,6 +32,7 @@
 
 #include "kernels.h"
 #include "q4k_gemv.cpp"           // 直接把 kernel 源拿进来：同一 TU 才能调到匿名命名空间里的 launcher
+#include "q4k_gemv_soa.cpp"     // SoA 内核（kernels.h 的 repack + gemv_soa 在这里被实例化）
 
 #include <cmath>
 #include <cstdio>
@@ -76,6 +77,19 @@ template <int SPLITS, bool STRIPE>
 void host_gemv(const std::uint8_t* w, const ActQ8View& a, float* out, int rows) {
     sycl::queue q;
     gemv_launch_one<kD, true, SPLITS, STRIPE>(w, a, out, rows, q);
+}
+
+// SoA 内核的包装：repack 到 qs/hdr 后跑 gemv_soa（垫片里同步，出函数就算完）
+void host_gemv_soa(const std::uint8_t* w_aos, int rows, int K, const ActQ8View& a, float* out) {
+    const int bpr = K / nova::kQK;
+    std::vector<std::uint8_t> qs(static_cast<std::size_t>(rows) * static_cast<std::size_t>(nova::syclk::soa_qs_row_bytes(bpr)));
+    std::vector<std::uint8_t> hdr(static_cast<std::size_t>(rows) * static_cast<std::size_t>(nova::syclk::soa_hdr_row_bytes(bpr)));
+    nova::syclk::repack_q4k_soa(w_aos, rows, bpr, qs.data(), hdr.data());
+    nova::syclk::SoAWeightView v{};
+    v.qs = qs.data(); v.hdr = hdr.data(); v.rows = rows; v.bpr = bpr;
+    sycl::queue q;
+    if (K == nova::syclk::kD)        nova::syclk::gemv_soa<nova::syclk::kD, true>(v, a, out, q);
+    else if (K == nova::syclk::kFFN) nova::syclk::gemv_soa<nova::syclk::kFFN, true>(v, a, out, q);
 }
 
 // 激活的生产者：用的就是生产代码（quant.cpp），不是复刻
@@ -389,6 +403,24 @@ int main(int argc, char** argv) {
         if (!ok) {
             std::printf("        第一个不符的行 = %d  got=%.9g  ref=%.9g\n", e.argmax,
                         static_cast<double>(outs[static_cast<std::size_t>(v)][static_cast<std::size_t>(e.argmax)]),
+                        ref[static_cast<std::size_t>(e.argmax)]);
+        }
+    }
+
+    // ---- 1b. SoA 内核（qs/hdr 分离布局）vs 同一个 double 参考 ----
+    std::printf("\n--- 1b. SoA 布局（qs 128 B + hdr 16 B，块头按 lane 连续排）---\n");
+    {
+        std::vector<float> out_soa(static_cast<std::size_t>(R));
+        nova::syclk::host_gemv_soa(w.data(), R, K, act, out_soa.data());
+        const Err e = vs_ref(out_soa.data(), ref.data(), R);
+        const bool ok = (e.rel_l2 < 1e-4);
+        if (!ok) ++failed;
+        const Err d = vs_f32(out_soa.data(), outs[0].data(), R);
+        std::printf("  %-26s rel_l2=%10.3e  max_abs=%10.3e  vsAoS=%10.3e  %s\n",
+                    "SoA (qs+hdr 分离)", e.rel_l2, e.max_abs, d.max_abs, ok ? "PASS" : "FAIL");
+        if (!ok) {
+            std::printf("        第一个不符的行 = %d  got=%.9g  ref=%.9g\n", e.argmax,
+                        static_cast<double>(out_soa[static_cast<std::size_t>(e.argmax)]),
                         ref[static_cast<std::size_t>(e.argmax)]);
         }
     }

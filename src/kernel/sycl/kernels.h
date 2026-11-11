@@ -148,5 +148,49 @@ extern template void gemv4<kD,   false>(const ChunkedWeight&, const std::int8_t*
 extern template void gemv4<kFFN, true >(const ChunkedWeight&, const std::int8_t*, const float*, const std::int32_t*, float*, sycl::queue&);
 extern template void gemv4<kFFN, false>(const ChunkedWeight&, const std::int8_t*, const float*, const std::int32_t*, float*, sycl::queue&);
 
+// ---------------------------------------------------------------------------
+// SoA（结构体拆数组）布局的 Q4_K GEMV —— 见 docs/SYCL_PORT.md §13
+//   qs  : [rows][BPR][128 B]
+//   hdr : [rows][NP][kInFlight][16 B]，按内核访问顺序排（每条 lane 的连续 p 相邻）
+// 加载期用 repack_q4k_soa() 把 AoS 的 144 B 块拆成这两个数组。
+// 收益：每块流量从 192 B（3 个 sector）降到 144 B（2.25 个 sector）。
+// ---------------------------------------------------------------------------
+inline constexpr int kSoAInFlight = syclb::kSyclSg / 8;
+inline constexpr int soa_np(int bpr) { return (bpr + kSoAInFlight - 1) / kSoAInFlight; }
+inline constexpr std::int64_t soa_qs_row_bytes(int bpr) { return static_cast<std::int64_t>(bpr) * 128; }
+inline constexpr std::int64_t soa_hdr_row_bytes(int bpr) {
+    return static_cast<std::int64_t>(soa_np(bpr)) * kSoAInFlight * 16;
+}
+
+struct SoAWeightView {
+    const std::uint8_t* qs   = nullptr;
+    const std::uint8_t* hdr  = nullptr;
+    std::int64_t        rows = 0;
+    int                 bpr  = 0;
+};
+
+// AoS(144 B/块) -> SoA。hdr 下标 = blk*np + p（同一条 lane 的连续 p 相邻，一次 64 B）
+inline void repack_q4k_soa(const std::uint8_t* aos, int rows, int bpr,
+                           std::uint8_t* qs_out, std::uint8_t* hdr_out) {
+    const int np = soa_np(bpr);
+    for (int r = 0; r < rows; ++r) {
+        const std::uint8_t* src = aos + static_cast<std::int64_t>(r) * bpr * 144;
+        std::uint8_t* qrow = qs_out  + static_cast<std::int64_t>(r) * soa_qs_row_bytes(bpr);
+        std::uint8_t* hrow = hdr_out + static_cast<std::int64_t>(r) * soa_hdr_row_bytes(bpr);
+        for (int p = 0; p < np; ++p) {
+            for (int blk = 0; blk < kSoAInFlight; ++blk) {
+                const int b = p * kSoAInFlight + blk;
+                if (b >= bpr) continue;
+                const std::uint8_t* sb = src + static_cast<std::int64_t>(b) * 144;
+                std::memcpy(qrow + static_cast<std::int64_t>(b) * 128, sb + 16, 128);
+                std::memcpy(hrow + static_cast<std::int64_t>(blk * np + p) * 16, sb, 16);
+            }
+        }
+    }
+}
+
+template <int K, bool HW>
+sycl::event gemv_soa(const SoAWeightView& w, const ActQ8View& a, float* out, sycl::queue& q);
+
 } // namespace syclk
 } // namespace nova

@@ -388,6 +388,13 @@ local_accessor<T, Dim>::local_accessor(range<Dim> r, handler& h)
     h.add_local(impl_);
 }
 
+// 垫片里 event 只需要是个可返回/可忽略的类型：生产代码用 parallel_for/submit 的返回值
+// 接 profiling 信息，CPU 垫片没有设备时间，所以是空类型。
+class event {
+public:
+    event() = default;
+};
+
 class queue {
 public:
     queue() = default;
