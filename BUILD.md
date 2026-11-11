@@ -49,6 +49,10 @@ ctest --test-dir build-cmake --output-on-failure
 
 SYCL 在 Windows 上：先 `call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"` 再跑 `build.bat sycl`。
 
+> ⚠️ **SYCL 的 CMake 分支尚未验证**：本会话里它在目标机上构建到第 1 个 object 就停住了（icpx 进程消失），
+> 原因未查清。**已验证的 SYCL 构建路径是 `build_sycl_e2e.bat 1.5b`**（它就是产出 34–36 tok/s 那个二进制的脚本）。
+> 想用 CMake 走 SYCL：先 setvars.bat，再 uild.bat sycl 1.5b，出问题请贴 uild_cmake_sycl.log。
+
 ---
 
 ## 4. 产物
