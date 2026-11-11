@@ -904,3 +904,36 @@ SoA (qs+hdr 分离)  rel_l2 = 8.586e-08   max_abs = 2.173e-06   vsAoS = 0.000e+0
    最大的未验证杠杆，且只需改一个编译宏。
 2. 每 subgroup 多行（一行 32 lane 只喂 6 个 super-block，指令/访存比低）。
 3. 两列批量（gemv4 已存在，decode 单列用不上）。
+### 13.9 最后一刀：DP4A 走不通，封版在 SoA v2（2026-11-11）
+
+试了把 `-DNOVA_SYCL_DP4A=0` 改成 `1`（强制硬件 dp4a），两步都失败：
+
+```
+sycl_common.h:174: error: no member named 'dp4a' in namespace 'sycl'
+（改成标准 sycl::dot 后）
+sycl_common.h:176: error: no matching function for call to 'dot'
+```
+
+结论：**DP4A 硬件路径在这个仓库里从来没被编译过** —— 它写的是不存在的
+`sycl::dp4a(a, b, c)`；而 SYCL 2020 的 `sycl::dot(vec<T,N>, vec<T,N>, T)` 要求
+三个参数同类型，int8×int8→int32 这条链没有直接对应（需要 Intel 扩展
+`sycl::ext::intel::math::dp4a` 或手写 PTX/汇编，属于下一步工作，不是改个宏）。
+
+**所以最终封版配置 = SoA v2（hdr 64 B 对齐 + 一次 64 B 载入），DP4A 保持关闭。**
+
+最终实测（Arc 130T，1.5B，10 token，探针开，`pd_sweep.bat 4`）：
+
+```
+27.54 ms/token -> 36.32 tok/s        （AoS 基线 29.22 ms/token = 34.23 tok/s，+6.1%）
+GPU 忙 97.6%
+gemv.down  252 次  52.19 ms  21.7%  37.38 GB/s
+gemv.up    252 次  51.59 ms  21.4%  37.81 GB/s
+gemv.gate  252 次  51.27 ms  21.3%  38.05 GB/s
+```
+
+- 三个大 GEMV 全部 ≥36 GB/s（用户设定的门槛）；
+- 端到端 36.32 tok/s，比 AoS 基线快 6.1%，比最初 35.54 tok/s 的 runner 首测快 2.2%；
+- 与 45 tok/s 的差距来自"指令发射受限"，不是流量 —— §13.8 的结论。
+
+**V2.4.0 的 SYCL 成绩单**：算子层数值 1e-8、GEMV 37–38 GB/s、端到端 36.32 tok/s、
+无 TDR、trace/仪表盘齐全。

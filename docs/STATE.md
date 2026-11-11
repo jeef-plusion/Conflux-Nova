@@ -11,8 +11,8 @@
 | 能力 | 状态 | 数字 | 文档 |
 |---|---|---|---|
 | SYCL 算子数值 | ✅ | 五项 `rel_l2` 1e-7~1e-8，`quant` 抽检 0 不一致 | `PERF_BASELINE.md` §2/§10 |
-| GEMV 带宽 | ✅ | 稳态 **36.8~38.8 GB/s** = 顺序读上限 61.38 的 60% | `PERF_BASELINE.md` §8.1 |
-| 1.5B 端到端 decode | ✅ | **28.14 ms/token = 35.54 tok/s**（真模型 28 层） | `SYCL_PORT.md` §12 |
+| GEMV 带宽 | ✅ | **37–38 GB/s**（SoA v2）；顺序读上限 61.38 | `PERF_BASELINE.md` §8.1 / `SYCL_PORT.md` §13 |
+| 1.5B 端到端 decode | ✅ | **27.54 ms/token = 36.32 tok/s**（SoA v2，GEMV 37–38 GB/s） | `SYCL_PORT.md` §12/§13.9 |
 | 方案 C（lane 重映射） | ❌ 已否决 | 四次 A/B 全负（-2.7% ~ -9.8%） | `SYCL_PORT.md` §11.6 |
 | DeepSeek-V2-Lite | 🟡 算子就绪 | MLA（rope/kv_store/decode）+ MoE 路由全部对拍 PASS | `DEEPSEEK_V2_LITE.md` |
 | 门槛 | ✅ 全绿 | 回归门 34 GB/s / 37 tok/s，`sycl_bench` 退出码 0 | `PERF_BASELINE.md` §11 |
