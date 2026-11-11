@@ -1,5 +1,0 @@
-C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\tests\sycl_gemv_host_check.cpp;C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\nova_host_check.dir\Release\sycl_gemv_host_check.obj
-C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\src\kernel\sycl\quant.cpp;C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\nova_host_check.dir\Release\quant.obj
-C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\src\kernel\sycl\norm.cpp;C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\nova_host_check.dir\Release\norm.obj
-C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\src\kernel\sycl\elem.cpp;C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\nova_host_check.dir\Release\elem.obj
-C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\src\loader\gguf.cpp;C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\nova_host_check.dir\Release\gguf.obj

@@ -21,3 +21,8 @@ startup.log
 /*.png
 /e2e_pd_*.txt
 /e2e_progress.log
+
+# CMake 产物与日志
+/build-cmake/
+/build*.log
+/e2e_pd_*.txt

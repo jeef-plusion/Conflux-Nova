@@ -1,4 +1,0 @@
-C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/HOST/CMakeFiles/nova_host_check.dir
-C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/HOST/CMakeFiles/RUN_TESTS.dir
-C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/HOST/CMakeFiles/ALL_BUILD.dir
-C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/HOST/CMakeFiles/ZERO_CHECK.dir
