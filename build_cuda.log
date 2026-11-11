@@ -1,0 +1,188 @@
+[build] backend=CUDA model=QWEN25_7B
+-- Building for: Visual Studio 17 2022
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.17763.
+-- The CXX compiler identification is MSVC 19.44.35229.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Conflux Nova: backend=CUDA model=QWEN25_7B scope=ON
+-- The CUDA compiler identification is NVIDIA 12.8.61 with host compiler MSVC 19.44.35229.0
+-- Detecting CUDA compiler ABI info
+-- Detecting CUDA compiler ABI info - done
+-- Check for working CUDA compiler: E:/12/bin/nvcc.exe - skipped
+-- Detecting CUDA compile features
+-- Detecting CUDA compile features - done
+-- Configuring done (7.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CUDA
+适用于 .NET Framework MSBuild 版本 17.14.60+43b635718
+
+  1>Checking Build System
+  Building Custom Rule C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/CMakeLists.txt
+  Compiling CUDA source file ..\..\code\kernel\1080ti\gemv_q4k.cu...
+  
+  C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA>"E:\12\bin\nvcc.exe"  --use-local-env -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64" -x cu   -I"C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\include" -I"C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code" -IE:\12\include     --keep-dir nova_ker.1CC09E02\x64\Release  -maxrregcount=0    --machine 64 --compile -cudart static -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Ob2 /utf-8"   -D_WINDOWS -DNDEBUG -DNOVA_MODEL_QWEN25_7B -DNOVA_SYCL_MODEL_QWEN25_7B -DNOVA_SCOPE=1 -D_CRT_SECURE_NO_WARNINGS -DNOMINMAX -D"CMAKE_INTDIR=\"Release\"" -D_MBCS -D"CMAKE_INTDIR=\"Release\"" -Xcompiler "/EHsc /W1 /nologo /O2 /FS   /MD " -Xcompiler "/FdC:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\Release\nova_kernels_cuda.pdb" -o nova_kernels_cuda.dir\Release\gemv_q4k.obj "C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\gemv_q4k.cu" 
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/q4k_gemv.cu(192): warning #760-D: function "nova::launch_gemv4<K,R>(const nova::Q4KWeight &, const int8_t *, const float *, const int *, float *, cudaStream_t) [with K=3584, R=3584]" explicitly instantiated more than once [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+    template void launch_gemv4<Model::NH * Model::HD, Model::D>(const Q4KWeight&, const int8_t*, const float*, const int*, float*, cudaStream_t);
+                  ^
+  
+  Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/q4k_gemv.cu(220): warning #760-D: function "nova::launch_gemv<K,R>(const nova::Q4KWeight &, const nova::ActQ8 &, float *, cudaStream_t) [with K=3584, R=3584]" explicitly instantiated more than once [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+    template void launch_gemv<Model::NH * Model::HD, Model::D>(const Q4KWeight&, const ActQ8&, float*, cudaStream_t);
+                  ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/norm.cu(50): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float best = -((float)(1e+300)); int bi = 0;
+                       ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/norm.cu(65): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float b = -((float)(1e+300)); int k = 0;
+                        ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/mmq.cu(136): warning #760-D: function "nova::mmq_launch<K,R>(const nova::Q4KWeight &, const nova::ActQ8 &, float *, int, cudaStream_t) [with K=3584, R=3584]" explicitly instantiated more than once [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+    template void mmq_launch<Model::NH * Model::HD, Model::D>(const Q4KWeight&, const ActQ8&, float*, int, cudaStream_t);
+                  ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/q4k_gemv.cu(192): warning #760-D: function "nova::launch_gemv4<K,R>(const nova::Q4KWeight &, const int8_t *, const float *, const int *, float *, cudaStream_t) [with K=3584, R=3584]" explicitly instantiated more than once [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+    template void launch_gemv4<Model::NH * Model::HD, Model::D>(const Q4KWeight&, const int8_t*, const float*, const int*, float*, cudaStream_t);
+                  ^
+  
+  Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/q4k_gemv.cu(220): warning #760-D: function "nova::launch_gemv<K,R>(const nova::Q4KWeight &, const nova::ActQ8 &, float *, cudaStream_t) [with K=3584, R=3584]" explicitly instantiated more than once [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+    template void launch_gemv<Model::NH * Model::HD, Model::D>(const Q4KWeight&, const ActQ8&, float*, cudaStream_t);
+                  ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/norm.cu(50): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float best = -((float)(1e+300)); int bi = 0;
+                       ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/norm.cu(65): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float b = -((float)(1e+300)); int k = 0;
+                        ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/mmq.cu(136): warning #760-D: function "nova::mmq_launch<K,R>(const nova::Q4KWeight &, const nova::ActQ8 &, float *, int, cudaStream_t) [with K=3584, R=3584]" explicitly instantiated more than once [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+    template void mmq_launch<Model::NH * Model::HD, Model::D>(const Q4KWeight&, const ActQ8&, float*, int, cudaStream_t);
+                  ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/rope.cu(39): warning #20281-D: in whole program compilation mode ("-rdc=false"), a __global__ function template instantiation or specialization ("nova::_NV_ANON_NAMESPACE::rope_batch_kernel<(bool)0> ") will be required to have a definition in the current translation unit, when "-static-global-template-stub" will be set to "true" by default in the future. To resolve this issue, either use "-rdc=true", or explicitly set "-static-global-template-stub=false" (but see nvcc documentation about downsides of turning it off) [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/rope.cu(21): warning #20281-D: in whole program compilation mode ("-rdc=false"), a __global__ function template instantiation or specialization ("nova::_NV_ANON_NAMESPACE::rope_kernel<(bool)0> ") will be required to have a definition in the current translation unit, when "-static-global-template-stub" will be set to "true" by default in the future. To resolve this issue, either use "-rdc=true", or explicitly set "-static-global-template-stub=false" (but see nvcc documentation about downsides of turning it off) [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+  
+CUDACOMPILE : nvcc warning : Support for offline compilation for architectures prior to '<compute/sm/lto>_75' will be removed in a future release (Use -Wno-deprecated-gpu-targets to suppress warning). [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+  gemv_q4k.cu
+  tmpxft_000027b4_00000000-7_gemv_q4k.cudafe1.cpp
+  Compiling CUDA source file ..\..\code\kernel\1080ti\attn.cu...
+  
+  C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA>"E:\12\bin\nvcc.exe"  --use-local-env -ccbin "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64" -x cu   -I"C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\include" -I"C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code" -IE:\12\include     --keep-dir nova_ker.1CC09E02\x64\Release  -maxrregcount=0    --machine 64 --compile -cudart static -std=c++17 --generate-code=arch=compute_61,code=[compute_61,sm_61] -Xcompiler="/EHsc -Ob2 /utf-8"   -D_WINDOWS -DNDEBUG -DNOVA_MODEL_QWEN25_7B -DNOVA_SYCL_MODEL_QWEN25_7B -DNOVA_SCOPE=1 -D_CRT_SECURE_NO_WARNINGS -DNOMINMAX -D"CMAKE_INTDIR=\"Release\"" -D_MBCS -D"CMAKE_INTDIR=\"Release\"" -Xcompiler "/EHsc /W1 /nologo /O2 /FS   /MD " -Xcompiler "/FdC:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\Release\nova_kernels_cuda.pdb" -o nova_kernels_cuda.dir\Release\attn.obj "C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\attn.cu" 
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(55): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+  Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(112): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(141): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float mm = -((float)(1e+300));
+                         ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(170): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float m = -((float)(1e+300));
+                        ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(223): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(269): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float mm = -((float)(1e+300));
+                         ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(313): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(405): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(432): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float mm = -((float)(1e+300));
+                         ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(112): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+  Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(141): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float mm = -((float)(1e+300));
+                         ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(170): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float m = -((float)(1e+300));
+                        ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(223): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(269): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float mm = -((float)(1e+300));
+                         ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(405): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(432): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+            float mm = -((float)(1e+300));
+                         ^
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(55): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+            detected during instantiation of "void nova::<unnamed>::flash_kernel<SWA>(const float *, const float *, const float *, float *, int, int, float) [with SWA=false]" at line 477
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(313): warning #221-D: floating-point value does not fit in required floating-point type [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+        float m = -((float)(1e+300)), l = 0.f;
+                    ^
+            detected during instantiation of "void nova::<unnamed>::flash_paged_kernel<SWA>(const float *, const float *, const float *, const int32_t *, float *, int, int, float, int, int) [with SWA=false]" at line 520
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(38): warning #20281-D: in whole program compilation mode ("-rdc=false"), a __global__ function template instantiation or specialization ("nova::_NV_ANON_NAMESPACE::flash_kernel<(bool)1> ") will be required to have a definition in the current translation unit, when "-static-global-template-stub" will be set to "true" by default in the future. To resolve this issue, either use "-rdc=true", or explicitly set "-static-global-template-stub=false" (but see nvcc documentation about downsides of turning it off) [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+  
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\code\kernel\1080ti\../../../src/kernel/attn.cu(293): warning #20281-D: in whole program compilation mode ("-rdc=false"), a __global__ function template instantiation or specialization ("nova::_NV_ANON_NAMESPACE::flash_paged_kernel<(bool)1> ") will be required to have a definition in the current translation unit, when "-static-global-template-stub" will be set to "true" by default in the future. To resolve this issue, either use "-rdc=true", or explicitly set "-static-global-template-stub=false" (but see nvcc documentation about downsides of turning it off) [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+  
+CUDACOMPILE : nvcc warning : Support for offline compilation for architectures prior to '<compute/sm/lto>_75' will be removed in a future release (Use -Wno-deprecated-gpu-targets to suppress warning). [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_kernels_cuda.vcxproj]
+  attn.cu
+  tmpxft_000035a0_00000000-7_attn.cudafe1.cpp
+  nova_kernels_cuda.vcxproj -> C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\Release\nova_kernels_cuda.lib
+  Building Custom Rule C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/CMakeLists.txt
+  gguf.cpp
+  validate.cpp
+C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\src\loader\validate.cpp(2,9): warning C4005: “NOMINMAX”: 宏重定义 [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_engine.vcxproj]
+      C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\src\loader\validate.cpp(2,9):
+      之前在命令行上声明的“NOMINMAX”
+  
+  model.cpp
+  正在生成代码...
+  nova_engine.vcxproj -> C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\Release\nova_engine.lib
+  Building Custom Rule C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/CMakeLists.txt
+  main.cpp
+    正在创建库 C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CUDA/Release/nova_core.lib 和对象 C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CUDA/Release/nova_core.exp
+LINK : warning LNK4098: 默认库“LIBCMT”与其他库的使用冲突；请使用 /NODEFAULTLIB:library [C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\nova_cuda.vcxproj]
+  nova_cuda.vcxproj -> C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\CUDA\Release\nova_core.exe
+  Building Custom Rule C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/CMakeLists.txt
+
+[build] 产物:
+nova_core.exe
+
+[build] 数值闸门（不需要显卡）:
+    ctest --test-dir "build-cmake\CUDA" -C Release --output-on-failure

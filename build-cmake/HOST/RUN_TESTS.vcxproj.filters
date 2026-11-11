@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\CMakeFiles\96966806ccdd70055833af9f98e6bbf1\RUN_TESTS_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{B16E81AD-03D2-36EB-951D-C3F2E71EA44D}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

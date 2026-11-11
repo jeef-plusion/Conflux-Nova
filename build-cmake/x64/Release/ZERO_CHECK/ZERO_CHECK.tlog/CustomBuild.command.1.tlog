@@ -1,0 +1,10 @@
+^C:\USERS\ADMINISTRATOR\DOCUMENTS\DEEPSEEK-HARNESS\DEFAULT-WORKSPACE\NOVA_V2\BUILD-CMAKE\CMAKEFILES\D79527838415317175AE9B54703728A5\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2 -BC:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/conflux_nova.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

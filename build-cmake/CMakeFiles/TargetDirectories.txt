@@ -1,0 +1,6 @@
+C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CMakeFiles/nova_core.dir
+C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CMakeFiles/nova_kernels_cuda.dir
+C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CMakeFiles/nova_cuda.dir
+C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CMakeFiles/RUN_TESTS.dir
+C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CMakeFiles/ALL_BUILD.dir
+C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/CMakeFiles/ZERO_CHECK.dir

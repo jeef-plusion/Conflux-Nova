@@ -1,0 +1,32 @@
+[build] backend=HOST model=QWEN25_1P5B
+-- Building for: Visual Studio 17 2022
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.17763.
+-- The CXX compiler identification is MSVC 19.44.35229.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Conflux Nova: backend=HOST model=QWEN25_1P5B scope=ON
+-- HOST 模式：只构建 CPU 垫片对拍（不需要 GPU / oneAPI）
+-- Configuring done (1.9s)
+-- Generating done (0.0s)
+-- Build files have been written to: C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/build-cmake/HOST
+适用于 .NET Framework MSBuild 版本 17.14.60+43b635718
+
+  1>Checking Build System
+  Building Custom Rule C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/CMakeLists.txt
+  sycl_gemv_host_check.cpp
+  quant.cpp
+  norm.cpp
+  elem.cpp
+  gguf.cpp
+  正在生成代码...
+  nova_host_check.vcxproj -> C:\Users\Administrator\Documents\deepseek-harness\default-workspace\nova_v2\build-cmake\HOST\Release\nova_host_check.exe
+  Building Custom Rule C:/Users/Administrator/Documents/deepseek-harness/default-workspace/nova_v2/CMakeLists.txt
+
+[build] 产物:
+nova_host_check.exe
+
+[build] 数值闸门（不需要显卡）:
+    ctest --test-dir "build-cmake\HOST" -C Release --output-on-failure

@@ -1,0 +1,36 @@
+# ============================================================================
+#  .editorconfig — 统一缩进与换行，防止 Windows 下把 .bat 的行尾吃掉
+#  https://editorconfig.org
+# ============================================================================
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# ---- Windows 批处理：必须是 CRLF，否则 cmd.exe 会把参数黏在一起 ----
+#      （本项目真踩过：.bat 被转成 LF 后 goto 标签失效，构建静默失败）
+[*.{bat,cmd}]
+end_of_line = crlf
+insert_final_newline = true
+
+# ---- 其他平台脚本：必须 LF ----
+[*.{sh,bash}]
+end_of_line = lf
+
+# ---- 构建与数据文件：不要动 ----
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[CMakeLists.txt]
+indent_size = 4
+
+[*.{cu,cuh}]
+indent_size = 4
