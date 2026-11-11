@@ -48,7 +48,8 @@ public:
     [[sycl::reqd_sub_group_size(syclb::kSyclSg)]]
     void operator()(sycl::nd_item<2> it) const {
         constexpr int BPR = K / kQK;
-        constexpr int NP  = soa_np(BPR);
+        constexpr int NP     = soa_np(BPR);
+        constexpr int NP_PAD = soa_np_pad(BPR);   // 行内 64 B 对齐所需的跨度
         constexpr int PD  = (NP < kPrefetchDepthSoA) ? NP : kPrefetchDepthSoA;
         constexpr std::uint32_t kMask = 0x0F0F0F0Fu;
 
@@ -66,14 +67,10 @@ public:
 
         float acc = 0.f;
         for (int p0 = 0; p0 < NP; p0 += PD) {
-            // 关键：本 lane 组这 PD 次迭代的块头在 hdr 里连续 → 一次 64 B 载入（1 sector）
-            Q4KHdr hg[PD];
-            #pragma unroll
-            for (int t = 0; t < PD; ++t) {
-                const int p   = (p0 + t < NP) ? (p0 + t) : (NP - 1);
-                const int idx = L.block * NP + p;   // 每条 lane 的块头在 hdr 里连续（4 个 = 64 B）
-                hg[t] = hdr_row[idx];
-            }
+            // 一次 64 B 载入抓 4 个块头：PD=4 时正好 1 个 sector（PD<4 时多读的部分被忽略），
+            // 而且 hdr 行跨度已补齐到 64 B 的倍数，这次载入是地址对齐的。
+            Q4KHdr hg[4];
+            __builtin_memcpy(hg, __builtin_assume_aligned(hdr_row + L.block * NP_PAD + p0, 64), 64);
 
             // qs：PD 个 16 B 载入先发出去（与原内核相同的预取窗）
             sycl::vec<std::int32_t, 4> wv[PD];

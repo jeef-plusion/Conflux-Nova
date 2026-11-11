@@ -156,10 +156,15 @@ extern template void gemv4<kFFN, false>(const ChunkedWeight&, const std::int8_t*
 // 收益：每块流量从 192 B（3 个 sector）降到 144 B（2.25 个 sector）。
 // ---------------------------------------------------------------------------
 inline constexpr int kSoAInFlight = syclb::kSyclSg / 8;
+
+// 每条 lane 要处理的块数（与内核的 NP 一致）
 inline constexpr int soa_np(int bpr) { return (bpr + kSoAInFlight - 1) / kSoAInFlight; }
 inline constexpr std::int64_t soa_qs_row_bytes(int bpr) { return static_cast<std::int64_t>(bpr) * 128; }
+// 每条 lane 的块头数补齐到 4 的倍数 —— 这样 blk*np_pad*16 一定 64 B 对齐，内核才能用
+// 一次 64 B 向量载入抓 4 个块头（§13.7 抢救方案的 1、2 两条）
+inline constexpr int soa_np_pad(int bpr) { return (soa_np(bpr) + 3) & ~3; }
 inline constexpr std::int64_t soa_hdr_row_bytes(int bpr) {
-    return static_cast<std::int64_t>(soa_np(bpr)) * kSoAInFlight * 16;
+    return static_cast<std::int64_t>(soa_np_pad(bpr)) * kSoAInFlight * 16;
 }
 
 struct SoAWeightView {
@@ -173,6 +178,7 @@ struct SoAWeightView {
 inline void repack_q4k_soa(const std::uint8_t* aos, int rows, int bpr,
                            std::uint8_t* qs_out, std::uint8_t* hdr_out) {
     const int np = soa_np(bpr);
+    const int np_pad = soa_np_pad(bpr);
     for (int r = 0; r < rows; ++r) {
         const std::uint8_t* src = aos + static_cast<std::int64_t>(r) * bpr * 144;
         std::uint8_t* qrow = qs_out  + static_cast<std::int64_t>(r) * soa_qs_row_bytes(bpr);
@@ -183,7 +189,7 @@ inline void repack_q4k_soa(const std::uint8_t* aos, int rows, int bpr,
                 if (b >= bpr) continue;
                 const std::uint8_t* sb = src + static_cast<std::int64_t>(b) * 144;
                 std::memcpy(qrow + static_cast<std::int64_t>(b) * 128, sb + 16, 128);
-                std::memcpy(hrow + static_cast<std::int64_t>(blk * np + p) * 16, sb, 16);
+                std::memcpy(hrow + static_cast<std::int64_t>(blk * np_pad + p) * 16, sb, 16);
             }
         }
     }
