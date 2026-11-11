@@ -1,13 +1,17 @@
 name: build
 
 # ============================================================================
-#  CI 的三道闸门（每次 push / PR 都跑）：
-#    1. format    —— clang-format 检查（注释与缩进不许漂）
-#    2. host      —— 纯 CPU 构建 + **数值对拍**（不需要显卡，这是最重要的一关）
-#    3. cuda      —— Windows 上装 CUDA 编译引擎（只验证"能编"，无 GPU 不跑）
+#  平台范围：**Windows x64 only**（本项目只在 Windows 上验证过：
+#  CUDA 走 MSVC + nvcc，SYCL 走 oneAPI + Intel 显卡驱动）。
+#  没有 Linux/macOS 的构建脚本，也不假装支持。
 #
-#  SYCL 后端需要 Intel GPU + oneAPI，GitHub 托管机没有，所以只在 README 里
-#  给出本地验证步骤，不放进 CI（诚实：跑不了的闸门不要装样子）。
+#  三道闸门：
+#    1. format  —— clang-format 检查（找不到就明说跳过，不装绿）
+#    2. host    —— 纯 CPU 构建 + 数值对拍（不需要显卡，最重要的一关）
+#    3. cuda    —— 编译引擎（runner 没有 nvcc 时明说跳过）
+#
+#  SYCL 后端需要 Intel GPU + oneAPI，GitHub 托管机没有，因此不进 CI；
+#  本地验证步骤见 BUILD.md 第 6 节。
 # ============================================================================
 
 on:
@@ -23,88 +27,101 @@ concurrency:
 jobs:
   format:
     name: clang-format
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 安装 clang-format
-        run: sudo apt-get update -qq && sudo apt-get install -y clang-format
-      - name: 检查格式（只查 C++ 源，不查 .bat）
+
+      - name: 定位 clang-format
+        id: probe
+        shell: pwsh
         run: |
-          files=$(git ls-files '*.cpp' '*.h' '*.cu' '*.cuh')
-          if [ -z "$files" ]; then echo "no sources"; exit 0; fi
-          clang-format --dry-run --Werror $files && echo "format OK"
+          $cf = Get-Command clang-format -ErrorAction SilentlyContinue
+          if (-not $cf) {
+            $guess = "C:\Program Files\LLVM\bin\clang-format.exe"
+            if (Test-Path $guess) { $cf = Get-Item $guess }
+          }
+          if ($cf) { "found=$($cf.Source)" | Out-File -Append $env:GITHUB_OUTPUT; echo "have=1" | Out-File -Append $env:GITHUB_OUTPUT }
+          else { echo "have=0" | Out-File -Append $env:GITHUB_OUTPUT }
+
+      - name: 检查格式
+        if: steps.probe.outputs.have == '1'
+        shell: pwsh
+        run: |
+          $files = git ls-files '*.cpp' '*.h' '*.cu' '*.cuh'
+          if (-not $files) { echo "no sources"; exit 0 }
+          & ${{ steps.probe.outputs.found }} --dry-run --Werror $files
+          if ($LASTEXITCODE -ne 0) { throw "clang-format 检查未通过" }
+
+      - name: 跳过说明
+        if: steps.probe.outputs.have != '1'
+        shell: pwsh
+        run: echo "runner 上没有 clang-format，跳过（不装样子地绿）"
 
   host:
-    name: host-numeric (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: host-numeric
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: 配置（HOST：只编 CPU 垫片）
-        run: cmake -B build-cmake -DNOVA_BACKEND=HOST -DNOVA_MODEL=QWEN25_1P5B
+        run: cmake -B build-cmake/HOST -DNOVA_BACKEND=HOST -DNOVA_MODEL=QWEN25_1P5B
 
       - name: 构建
-        run: cmake --build build-cmake --config Release -j 4
+        run: cmake --build build-cmake/HOST --config Release -j 4
 
-      - name: 冒烟（无模型文件时，垫片应当打印用法并以非 0 退出，而不是崩）
-        shell: bash
+      - name: 冒烟（无模型时应正常退出，不许崩）
+        shell: pwsh
         run: |
-          exe=$(find build-cmake -name 'nova_host_check*' -type f | head -n1)
-          echo "exe=$exe"
-          set +e
-          "$exe" /nonexistent.gguf > smoke.log 2>&1
-          rc=$?
-          set -e
-          cat smoke.log
-          # 0xC0000409 / segfault 这类崩溃码不允许出现
-          if [ $rc -eq 139 ] || [ $rc -eq 134 ]; then echo "垫片崩溃了 (rc=$rc)"; exit 1; fi
-          echo "smoke rc=$rc (允许：缺模型时的正常退出)"
+          $exe = Get-ChildItem build-cmake/HOST -Recurse -Filter nova_host_check.exe | Select-Object -First 1
+          if (-not $exe) { throw "没找到 nova_host_check.exe" }
+          & $exe.FullName "$PWD/nonexistent.gguf" | Tee-Object smoke.log
+          $rc = $LASTEXITCODE
+          echo "smoke rc=$rc"
+          # 0xC0000409 / 0xC0000005 这类崩溃码不允许出现
+          if ($rc -eq -1073740791 -or $rc -eq -1073741819) { throw "垫片崩溃了 (rc=$rc)" }
+          echo "（缺模型时的非 0 退出是正常的）"
 
       - name: 数值对拍（仓库里带模型时才跑）
-        shell: bash
+        shell: pwsh
         run: |
-          if [ -f build/q4k_15b.gguf ]; then
-            exe=$(find build-cmake -name 'nova_host_check*' -type f | head -n1)
-            "$exe" build/q4k_15b.gguf | tee check.log
-            grep -q "失败项 = 0" check.log
-          else
+          if (Test-Path build/q4k_15b.gguf) {
+            $exe = Get-ChildItem build-cmake/HOST -Recurse -Filter nova_host_check.exe | Select-Object -First 1
+            & $exe.FullName build/q4k_15b.gguf | Tee-Object check.log
+            if ($LASTEXITCODE -ne 0) { throw "数值对拍失败" }
+            Select-String -Path check.log -Pattern "失败项 = 0" -Quiet | ForEach-Object {
+              if (-not $_) { throw "输出里没有 '失败项 = 0'" }
+            }
+          } else {
             echo "仓库里没有模型（正常：模型不进 git），跳过数值对拍"
-          fi
+          }
 
   cuda:
-    name: cuda-compile (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
+    name: cuda-compile
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 检查 CUDA 工具链
+      - name: 检查 nvcc
         id: probe
-        shell: bash
+        shell: pwsh
         run: |
-          if command -v nvcc >/dev/null 2>&1; then
-            echo "nvcc=$(nvcc --version | tail -n1)"
-            echo "have=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "no nvcc on this runner"
-            echo "have=0" >> "$GITHUB_OUTPUT"
-          fi
+          if (Get-Command nvcc -ErrorAction SilentlyContinue) {
+            nvcc --version | Select-Object -Last 2
+            echo "have=1" | Out-File -Append $env:GITHUB_OUTPUT
+          } else {
+            echo "runner 上没有 nvcc"
+            echo "have=0" | Out-File -Append $env:GITHUB_OUTPUT
+          }
 
       - name: 配置
         if: steps.probe.outputs.have == '1'
-        run: cmake -B build-cmake -DNOVA_BACKEND=CUDA -DNOVA_MODEL=QWEN25_7B -DNOVA_CUDA_ARCH=sm_61
+        run: cmake -B build-cmake/CUDA -DNOVA_BACKEND=CUDA -DNOVA_MODEL=QWEN25_7B -DNOVA_CUDA_ARCH=sm_61
 
       - name: 构建
         if: steps.probe.outputs.have == '1'
-        run: cmake --build build-cmake --config Release -j 4
+        run: cmake --build build-cmake/CUDA --config Release -j 4
 
       - name: 跳过说明
         if: steps.probe.outputs.have != '1'
+        shell: pwsh
         run: echo "该 runner 无 CUDA 工具链，跳过（不装样子地绿）"

@@ -61,7 +61,7 @@ rem 每个后端一个独立构建目录：同一个目录里换后端会串味�
 set "BDIR=build-cmake\%NOVA_BACKEND%"
 if /i "%~3"=="clean" (if exist "%BDIR%" rmdir /s /q "%BDIR%")
 
-"%CMAKE_EXE%" -B "%BDIR%" -DNOVA_BACKEND=%NOVA_BACKEND% -DNOVA_MODEL=%NOVA_MODEL% || exit /b 1
+
 "%CMAKE_EXE%" --build "%BDIR%" --config Release || exit /b 1
 
 echo.

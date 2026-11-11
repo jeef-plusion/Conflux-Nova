@@ -1,21 +1,19 @@
 # BUILD · 三分钟构建
 
-> 一套 CMake，四个后端选项，两个平台。根目录那 23 个 `.bat` 是历史遗留的快捷方式，
+> **平台：Windows x64 only。** 本项目只在 Windows 上验证过（CUDA = MSVC + nvcc，
+> SYCL = oneAPI + Intel 显卡驱动）。没有 Linux/macOS 构建脚本，也不假装支持。
+>
+> 一套 CMake，三个后端选项。根目录那 22 个 `.bat` 是历史遗留的快捷方式，
 > **新代码与 CI 只走 CMake**。
 
 ---
 
 ## 1. 最短路径
 
-```bash
-# Windows
-build.bat                    # CUDA + Qwen2.5-7B（默认）
-build.bat sycl 1.5b          # Intel Arc + Qwen2.5-1.5B
-build.bat host               # 只编 CPU 垫片（任何机器、无显卡）
-
-# Linux / macOS
-./build.sh
-./build.sh host
+```bat
+build.bat                    :: CUDA + Qwen2.5-7B（默认）
+build.bat sycl 1.5b          :: Intel Arc + Qwen2.5-1.5B
+build.bat host               :: 只编 CPU 垫片（任何机器、无显卡）
 ```
 
 等价的手工命令：
@@ -47,7 +45,7 @@ ctest --test-dir build-cmake --output-on-failure
 |---|---|---|
 | CUDA | CUDA Toolkit 11.8+（`nvcc`）、MSVC 2022 或 gcc 11+ | `nvcc --version` |
 | SYCL | Intel oneAPI（`icpx`）+ Intel 显卡驱动 | `icpx --version` |
-| HOST | 任意 C++17 编译器 + CMake 3.20+ | `cmake --version` |
+| HOST | MSVC 或任意 C++17 编译器 + CMake 3.20+ | `cmake --version` |
 
 SYCL 在 Windows 上：先 `call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"` 再跑 `build.bat sycl`。
 

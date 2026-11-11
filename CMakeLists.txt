@@ -138,11 +138,15 @@ if(NOVA_BACKEND_U STREQUAL "CUDA")
     endif()
 
 elseif(NOVA_BACKEND_U STREQUAL "SYCL")
-    find_program(ICX NAMES icpx icpx.exe)
-    if(NOT ICX)
-        message(FATAL_ERROR "找不到 icpx：先 call \"%ONEAPI_ROOT%\\setvars.bat\" 再 cmake")
+    # icpx 必须在 project() 之前就成为编译器 —— 所以这里**不能** set(CMAKE_CXX_COMPILER)，
+    # 那已经太晚（project() 早就选好了）。正确做法：先 call setvars.bat（icpx 进 PATH），
+    # 再跑 cmake；这里只做校验，选错编译器时给出可执行的提示。
+    if(NOT CMAKE_CXX_COMPILER MATCHES "icpx")
+        message(FATAL_ERROR
+            "SYCL 后端要求用 icpx 作为 C++ 编译器，当前是: ${CMAKE_CXX_COMPILER}\n"
+            "先执行:  call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\"\n"
+            "再执行:  cmake -B build-cmake\\SYCL -DNOVA_BACKEND=SYCL ...")
     endif()
-    set(CMAKE_CXX_COMPILER "${ICX}")
 
     # [core] src/kernel/sycl/*.cpp + code/device/sycl/device.cpp
     add_library(nova_kernels_sycl STATIC
