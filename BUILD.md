@@ -49,9 +49,12 @@ ctest --test-dir build-cmake --output-on-failure
 
 SYCL 在 Windows 上：先 `call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"` 再跑 `build.bat sycl`。
 
-> ⚠️ **SYCL 的 CMake 分支尚未验证**：本会话里它在目标机上构建到第 1 个 object 就停住了（icpx 进程消失），
-> 原因未查清。**已验证的 SYCL 构建路径是 `build_sycl_e2e.bat 1.5b`**（它就是产出 34–36 tok/s 那个二进制的脚本）。
-> 想用 CMake 走 SYCL：先 setvars.bat，再 uild.bat sycl 1.5b，出问题请贴 uild_cmake_sycl.log。
+> ✅ **SYCL 已通过 CMake 验证**（Arc 130T，2026-11-11）：`build.bat sycl 1.5b clean` → 52 s →
+> `build-cmake\SYCL\nova_sycl.exe` → **27.25 ms/token = 36.70 tok/s**。
+>
+> 它有两个硬前提，`build.bat` 已代劳；手工跑 cmake 时必须自己保证：
+> 1. **先 `vcvars64.bat` 再 `setvars.bat`**（反了 icpx 找不到 MSVC 的 C++ 标准库头，报 `type_traits not found`）；
+> 2. **必须用 Ninja 生成器**（`-G Ninja`）：MSBuild 会剥掉 Intel 的 LIB 路径，链接器报 `LNK1104: libmmd.lib`。
 
 ---
 

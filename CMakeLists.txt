@@ -90,8 +90,9 @@ endif()
 #  core：引擎库，不含 main
 #    [core] src/loader/*.cpp, src/model.cpp
 # ---------------------------------------------------------------------------
-# HOST 模式不建 nova_core：src/model.cpp 会拉进 cuda_runtime.h，HOST 机器没有 CUDA。
-if(NOT NOVA_BACKEND_U STREQUAL "HOST")
+# nova_engine 是 **CUDA 线**的引擎库（src/model.cpp 会拉进 cuda_runtime.h），
+# 只有 CUDA 后端建它；HOST 与 SYCL 都不需要（SYCL 的引擎在 nova_sycl 那条命令里）。
+if(NOVA_BACKEND_U STREQUAL "CUDA")
     add_library(nova_engine STATIC
         src/loader/gguf.cpp
         src/loader/validate.cpp
@@ -138,18 +139,28 @@ if(NOVA_BACKEND_U STREQUAL "CUDA")
     endif()
 
 elseif(NOVA_BACKEND_U STREQUAL "SYCL")
-    # icpx 必须在 project() 之前就成为编译器 —— 所以这里**不能** set(CMAKE_CXX_COMPILER)，
-    # 那已经太晚（project() 早就选好了）。正确做法：先 call setvars.bat（icpx 进 PATH），
-    # 再跑 cmake；这里只做校验，选错编译器时给出可执行的提示。
-    if(NOT CMAKE_CXX_COMPILER MATCHES "icpx")
+    # ---------------------------------------------------------------------
+    #  SYCL 用**一条 icpx 命令**构建 —— 与已验证的 build_sycl_e2e.bat 完全相同。
+    #
+    #  为什么不走 MSBuild 的多目标（add_library + add_executable）：
+    #   1) Windows 上 icpx 必须同时拿到 vcvars64 与 oneAPI 两套环境，缺一个就报
+    #      "'type_traits' file not found"（实测）；按文件驱动时这个错误出现在每个 TU，
+    #      被 MSBuild 吞掉后表现为"编到第 1 个 object 就停住"；
+    #   2) 一次调用让 device code split 与链接在同一个进程里完成，比 11 个 TU 分别做
+    #      device 编译再链接快得多。
+    #
+    #  所以这里把那条命令原样包成 custom target：CMake 负责"一键"，icpx 负责"编译"。
+    #  前提：先 call vcvars64.bat，再 call setvars.bat（顺序不能反）。
+    # ---------------------------------------------------------------------
+    find_program(ICX NAMES icpx icpx.exe)
+    if(NOT ICX)
         message(FATAL_ERROR
-            "SYCL 后端要求用 icpx 作为 C++ 编译器，当前是: ${CMAKE_CXX_COMPILER}\n"
-            "先执行:  call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\"\n"
-            "再执行:  cmake -B build-cmake\\SYCL -DNOVA_BACKEND=SYCL ...")
+            "找不到 icpx。SYCL 后端需要先执行:\n"
+            "  call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\"\n"
+            "  call \"C:\\Program Files (x86)\\Intel\\oneAPI\\setvars.bat\"")
     endif()
 
-    # [core] src/kernel/sycl/*.cpp + code/device/sycl/device.cpp
-    add_library(nova_kernels_sycl STATIC
+    set(NOVA_SYCL_SOURCES
         code/device/sycl/device.cpp
         src/kernel/sycl/q4k_gemv.cpp
         src/kernel/sycl/q4k_gemv4.cpp
@@ -158,23 +169,46 @@ elseif(NOVA_BACKEND_U STREQUAL "SYCL")
         src/kernel/sycl/rope.cpp
         src/kernel/sycl/elem.cpp
         src/kernel/sycl/attn.cpp
-        src/kernel/sycl/mla.cpp
-        src/kernel/sycl/moe.cpp
+        code/model/sycl/runner.cpp
+        src/loader/gguf.cpp
+        tests/sycl_e2e.cpp
     )
-    target_include_directories(nova_kernels_sycl PUBLIC
-        include code code/device/sycl code/model/sycl src/kernel/sycl)
-    target_compile_options(nova_kernels_sycl PUBLIC -fsycl -O3)
-    target_compile_definitions(nova_kernels_sycl PUBLIC ${NOVA_MODEL_MACRO} ${NOVA_SYCL_MODEL_MACRO})
-    target_link_libraries(nova_engine PUBLIC nova_kernels_sycl)
+    # 只编**仓库里真实存在**的源：mla/moe 是 DeepSeek-V2-Lite 的算子，可能还没同步到
+    # 某些工作副本（踩过：目标机上报 "no such file or directory: mla.cpp"）。缺了就明说。
+    set(_sycl_present "")
+    foreach(_src IN LISTS NOVA_SYCL_SOURCES)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/${_src}")
+            list(APPEND _sycl_present "${CMAKE_SOURCE_DIR}/${_src}")
+        else()
+            message(STATUS "SYCL: 跳过不存在的源 ${_src}")
+        endif()
+    endforeach()
+    set(NOVA_SYCL_SOURCES "${_sycl_present}")
 
-    # [apps] tests/sycl_e2e.cpp + code/model/sycl/runner.cpp
-    if(NOVA_BUILD_APPS)
-        add_executable(nova_sycl tests/sycl_e2e.cpp code/model/sycl/runner.cpp)
-        target_include_directories(nova_sycl PRIVATE
-            include code code/device/sycl code/model/sycl src/kernel/sycl)
-        target_compile_options(nova_sycl PUBLIC -fsycl -O3)
-        target_link_libraries(nova_sycl PRIVATE nova_engine)
-    endif()
+    # MSBuild 执行自定义命令时会剥掉 Intel 的 LIB 路径，链接器就找不到 libmmd.lib
+    # （踩过：LNK1104）。所以这里显式把 oneAPI 的 lib 目录加上。
+    get_filename_component(_icx_bin "${ICX}" DIRECTORY)
+    get_filename_component(_oneapi_lib "${_icx_bin}/../lib" ABSOLUTE)
+    message(STATUS "SYCL: oneAPI lib = ${_oneapi_lib}")
+
+    set(NOVA_SYCL_OUT "${CMAKE_BINARY_DIR}/nova_sycl.exe")
+    add_custom_command(
+        OUTPUT "${NOVA_SYCL_OUT}"
+        COMMAND "${ICX}"
+                -fsycl -O3 -std=c++17 -fsycl-device-code-split=per_kernel
+                -DNOVA_SYCL_MODEL_${NOVA_MODEL}
+                -DNOVA_SYCL_SG=16 -DNOVA_SYCL_GEMV_ROWS=8 -DNOVA_SYCL_DP4A=0
+                -I${CMAKE_SOURCE_DIR}/include
+                -I${CMAKE_SOURCE_DIR}/code
+                -I${CMAKE_SOURCE_DIR}/code/device/sycl
+                -I${CMAKE_SOURCE_DIR}/code/model/sycl
+                -I${CMAKE_SOURCE_DIR}/src/kernel/sycl
+                ${NOVA_SYCL_SOURCES}
+                -o "${NOVA_SYCL_OUT}"
+        DEPENDS ${NOVA_SYCL_SOURCES} ${CMAKE_SOURCE_DIR}/CMakeLists.txt
+        COMMENT "icpx: 一条命令编 SYCL 端到端（等价于 build_sycl_e2e.bat）"
+        VERBATIM)
+    add_custom_target(nova_sycl ALL DEPENDS "${NOVA_SYCL_OUT}")
 
 elseif(NOVA_BACKEND_U STREQUAL "HOST")
     message(STATUS "HOST 模式：只构建 CPU 垫片对拍（不需要 GPU / oneAPI）")
