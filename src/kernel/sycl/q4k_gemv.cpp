@@ -1,20 +1,64 @@
-// nova_v2/src/kernel/sycl/q4k_gemv.cpp — Q4_K x int8 的 GEMV（decode 主路径）
+// nova_v2/src/kernel/sycl/q4k_gemv.cpp — Q4_K 权重 × int8 激活的单列 GEMV（decode 主路径）
 //
-// 结构直接对照 src/kernel/q4k_gemv.cu（CUDA sm_61 版），映射关系：
-//   1 个 subgroup 吃 1 行；lane 固定持 16 B 权重（= 32 个 4-bit 权重）；
-//   lane 的 8 个子片（c = lane & 7）覆盖一个 256-super-block 的 qs[128]；
-//   kBlocksInFlight 个 lane 组（lane >> 3）同时抓 kBlocksInFlight 个 super-block。
+// ============================ 它解决什么问题 ============================
+// decode 每个 token 都要把整个权重矩阵读一遍（1.5B 约 954 MiB/token），所以这就是一条
+// **带宽受限**的路径：算得再快也没用，能不能把 37 GB/s 喂到 50+ 才是关键。
+// 与 CUDA 版 src/kernel/q4k_gemv.cu 逐行同构（同 lane 映射、同累加顺序），便于两边对拍。
 //
-// 方案 C（docs/SYCL_PORT.md §11）：一行不再由 1 个 subgroup 独占，而是切成 SPLITS 段，
-//   SPLITS 个 subgroup 各扫一段连续区（或交错扫，见 NOVA_SYCL_GEMV_STRIPE），
-//   每段出部分和，走 local 内合并。SPLITS=1 时退化回旧映射（A/B 的对照臂）。
+// ============================ 核心参数 ============================
+//   K       每行列数，必须是 256 的倍数（Q4_K 的 super-block 是 256 元素）。
+//           取值：kD（1536，hidden 宽）或 kFFN（8960，FFN 宽）。
+//   HW      true = 走硬件路径（NOVA_SYCL_DP4A 决定是 dp4a 还是标量），false = 强制标量。
+//           注意：**当前 DP4A 恒为关闭**（SYCL 2020 没有 int8×int8→int32 的 dot 形式，
+//           见 docs/SYCL_PORT.md §13.9），所以 HW=true 实际等于标量。
+//   SPLITS  一行由几个 subgroup 分段扫。取值 1..kGemvRows（默认 1）。
+//           1 = 旧映射（A/B 基线）；>1 = 方案 C，已证伪，仅保留作对照臂。
+//   STRIPE  段间是否交错（false = 各扫一段连续区）。只在 SPLITS>1 时有意义。
+//   PD      预取窗深度，= min(NP, NOVA_SYCL_GEMV_PD)，默认 4。
+//           实测 4 最优：8/16 会让 wv[PD] 溢出到私有内存，带宽反降 18%/40%。
 //
-// 与 llama.cpp 的对应关系（详见 docs/SYCL_PORT.md）：
-//   ggml-sycl/mmvq.cpp : mul_mat_vec_q<QK_K, QI4_K, block_q4_K,
-//                                        VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1>
-//   ggml-sycl/vecdotq.hpp : vec_dot_q4_K_q8_1_impl_vmmq()
-// 区别只有两点：① 我们的激活自带每 16 元素的 int 和（xs），省掉 dot2 = dp4a(0x01010101,u)
-// 那两步；② 我们一次发 PD 个 16 B 载入（预取窗），llama.cpp 是逐块串行。
+// ============================ lane / work-group 映射 ============================
+//   一个 work-group = kGemvRows 个 subgroup（默认 8 行），
+//   一个 subgroup = 一行，lane 与 super-block 内 16 B 的对应关系由 q4k_lane(lane) 给出：
+//     lane 的 bit0..2 选 8 个 16 B 子片之一，bit3.. 决定同时抓第几个 super-block。
+//   每个 144 B 的 super-block 被 8 个 lane 各读 16 B 的 qs（合并成 128 B 一次传输），
+//   而 16 B 的块头（d/dmin/scales）被同一 subgroup 的所有 lane 重复读 —— 同地址广播，
+//   硬件合并成 1 个事务，但仍占一个 64 B sector（每块 192 B 流量，这就是 46 GB/s 天花板）。
+//
+// ============================ 逻辑步骤 ============================
+//   1. row = group_id * RWS + (sg_id / SPLITS)；越界的行整个 subgroup 一起跳过（不早退，
+//      因为下面有 barrier —— 见"边界检查"）。
+//   2. 本段负责的 super-block 区间 [b0, hi)：SPLITS=1 时就是 [0, BPR)。
+//   3. 预取窗：一次发 PD 个 16 B 的 qs 载入（wv[t]），再回来算，掩盖 DRAM 延迟。
+//   4. 每个块：q4k_lane 取出 4 个 int32 权重 → 与 int8 激活做 dp4a（或标量）→ 乘
+//      scale/min → 累加到 acc。
+//   5. SPLITS=1：sg_sum 归约后 lane0 写 out[row]；SPLITS>1：先写 local part_，
+//      barrier 后由 split==0 的 subgroup 相加写出。
+//
+// ============================ 边界检查（每一处都在防什么） ============================
+//   · `sbi < hi ? sbi : hi - 1`：预取窗会越过段尾，多读的那几次读"本段最后一块"（数据会
+//     被丢掉），**故意不读行外**；所以 hi-1 必须 >= 0，由 static_assert(K/kQK >= SPLITS) 保证。
+//   · `row < rows_`：行数不是 RWS 的整数倍时，最后一组会有越界行；这些行不写 out，
+//     但仍要走到 barrier（所以不能 return）。
+//   · `p >= NP || sbi >= hi → continue`：预取窗尾部与段尾的双重裁剪。
+//
+// ============================ 指针生命周期 ============================
+//   w_ / xq_ / xd_ / xs_ / out_ 全是**调用方**（gemv_launch / ChunkedWeight）持有的设备
+//   指针，本 kernel 只读不持有：launch 返回后它们仍由 Device/runner 管理，kernel 不释放任何东西。
+//   part_ 是 local_accessor（work-group 私有），生命周期 = 本次 launch。
+//
+// ============================ 硬件差异（CUDA vs SYCL） ============================
+//   · CUDA sm_61：warp 32 lane，`__shfl_down_sync` 做归约，`__dp4a` 可用。
+//   · Intel Arc：subgroup 由 NOVA_SYCL_SG 决定（默认 16，⚠️ 16 时 kBlocksInFlight=2，
+//     与 CUDA 的 4 不同，**A/B 对比时必须同 SG**）；`sycl::reduce_over_group` 做归约。
+//   · 头文件里所有 static_assert 都在兜住"SG 必须整除 32"这类跨后端假设。
+//
+// ============================ 与 llama.cpp 的对应 ============================
+//   ggml-sycl/mmvq.cpp   : mul_mat_vec_q<QK_K, QI4_K, block_q4_K, ...>
+//   ggml-sycl/vecdotq.hpp: vec_dot_q4_K_q8_1_impl_vmmq()
+//   区别只有两点：① 我们的激活自带每 16 元素的 int 和（xs），省掉 dot2 那两步；
+//   ② 我们一次发 PD 个 16 B 载入（预取窗），llama.cpp 是逐块串行。
+
 #include "kernels.h"
 
 namespace nova {

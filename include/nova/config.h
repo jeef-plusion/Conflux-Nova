@@ -40,7 +40,20 @@ inline constexpr int kMaxBatch        = 4;
 } // namespace nova
 
 // 唯一允许的失败方式：断言/中止。没有 return false，没有 fallback。
-#define NOVA_REQUIRE(cond) assert(cond)
+//
+// ⚠️ 故意**不用 assert()**：`-DNDEBUG`（Release 默认）会把 assert 整段裁掉，那样所有
+// "防弹衣"（arena 越界、空指针、维度不符）都会在生产版本里消失 —— 这正是 TDR 事故的成因：
+// cudaMalloc 返回 NULL 后继续跑。所以用不可裁剪的 if + abort，任何构建配置都会炸。
+#define NOVA_REQUIRE(cond)                                                    \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            std::fflush(stdout);                                              \
+            std::fprintf(stderr, "[nova] FATAL %s:%d  断言失败: %s\n",        \
+                         __FILE__, __LINE__, #cond);                          \
+            std::fflush(stderr);                                              \
+            std::abort();                                                     \
+        }                                                                     \
+    } while (0)
 #define NOVA_ABORT(msg)                                                       \
     do {                                                                      \
         std::fflush(stdout);                                                  \

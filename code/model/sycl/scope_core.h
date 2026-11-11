@@ -1,20 +1,49 @@
-// nova_v2/code/model/sycl/scope_core.h — NovaScope 的核心（纯 C++，不依赖 SYCL）
+// nova_v2/code/model/sycl/scope_core.h — NovaScope 的统计核心（纯 C++，零 SYCL 依赖）
 //
-// 拆成两个头文件是为了能**在本机（无 oneAPI）验证**：
-//   scope_core.h  —— 记录、聚合、Chrome trace JSON 输出（本文件）
-//   scope_sycl.h  —— SYCL 事件探针（enable_profiling 队列 + event::get_profiling_info）
+// ============================ 它解决什么问题 ============================
+// 回答三个问题：**谁在偷懒、谁在堵车、钱花在哪**。
+// 每个 kernel 的 device 起止、每次 H2D/D2H 的字节、每层的权重流量，最后合成
+// Chrome trace（拖进 chrome://tracing 或 ui.perfetto.dev）和一张"数据交通图"仪表盘。
 //
-// 设计口径（重要，别把它当 Nsight 用）：
-//   ✅ 硬数据：kernel 的 device start/end（SYCL profiling event）、submit→start 的排队间隙、
-//      每次 H2D/D2H 的字节数与次数、每个 op 的有效带宽、GPU 忙比（kernel 时间 / 墙钟时间）。
-//   ⚠️ 估算：计算单元占用（occupancy）= 该 kernel 的 work-group 数 × 线程数 / 理论驻留上限。
-//      它回答"这次发射能不能填满机器"，不等于硬件计数器里的 EU 活跃周期。
-//   ❌ 拿不到：真实 EU 利用率、GPU 频率、温度 —— Windows + iGPU 没有可靠的公开接口
-//      （要 Intel Metrics Discovery API / Level Zero Sysman）。这里一律填 NaN 并打印 "n/a"，
-//      留 set_hw_sample() 钩子给外部采样器接（GPU-Z / sysman / 你自己的 dll）。
+// ============================ 为什么拆成两个头 ============================
+//   scope_core.h —— 记录/聚合/JSON（本文件，纯 C++，**本机无 oneAPI 也能编译和自测**）
+//   scope_sycl.h —— SYCL 事件探针（profiling 队列 + 边界事件），CUDA 版是 scope_cuda.h
+// 这样统计逻辑可以在没有 GPU 的机器上用合成事件流验证（tests/scope_host_check.cpp）。
 //
-// 数据流：Scope::op() 记录一条 Rec（提交时刻 + 事件句柄占位）-> resolve() 用事件补齐设备时间
-//        -> summarize() 出统计 -> write_trace() 出 Chrome/Perfetto 能吃的 JSON。
+// ============================ 数据流（一条记录的一生） ============================
+//   Scope::begin(name, phase, bytes)   记 host 时刻，push 一条 Rec
+//     → 设备事件由 scope_sycl/cuda 填进 pending 队列
+//   resolve_all(queue)                 一次同步，把事件时间换算成 (start, end)，写回 Rec
+//   summarize()                        聚合成 Summary（Top 算子、忙比、拷贝率、带宽）
+//   print_report() / write_trace()     终端报告 / Chrome trace JSON
+//
+// ============================ 数据可信度（重要，别当 Nsight 用） ============================
+//   ✅ 硬数据：kernel 的 device start/end、每次拷贝的字节与次数、每个 op 的有效带宽、
+//              GPU 忙比（Σ 计算类 op 时间 ÷ 墙钟）。
+//   ⚠️ 估算：occupancy = work-group 数 × WG 大小 ÷ 理论驻留上限；回答"能不能填满机器"，
+//              不是硬件计数器里的 EU 活跃周期。
+//   ❌ 拿不到：真实 EU 利用率、GPU 频率、温度 —— Windows + iGPU 没有可靠公开接口
+//              （要 Intel Metrics Discovery / Level Zero Sysman）。一律填 NaN 并打 "n/a"，
+//              set_hw_sample() 留给外部采样器接。
+//
+// ============================ 核心参数 ============================
+//   Phase        Compute / Copy / Host / Other，决定 Rec 计入忙时还是拷贝时。
+//   Rec::bytes   该 op 的**权重字节**（不是输出字节）或拷贝字节；0 表示不参与带宽统计。
+//   Rec::tok      第几个生成 token（-1 = 加载期）；用于每 token 拷贝触发率。
+//   Rec::layer   第几层（-1 = 无层，如 head/embed/加载）；用于每层流量计数器。
+//   Summary::tokens  = max(tok)+1，除零由调用方保证（至少 1）。
+//
+// ============================ 两个必须知道的坑（都踩过） ============================
+//   1. **不要把 host 时钟和 device 时钟相减**。SYCL 的 command_end 是 GPU 单调时钟，
+//      steady_clock 是 host 时钟，混用会得到 -5e14 这种时间戳（V2.4.0 真踩过）。
+//      规则：时间轴整体落在设备时钟域里，submit_ns 对齐到 start_ns，gap 恒 0。
+//   2. **不要持有 Rec& 跨过 push_back**。recs_ 是 std::vector，扩容会让引用失效；
+//      begin() 返回的引用只在本语句内有效，要跨语句就用下标（size() 快照）。
+//
+// ============================ 指针与生命周期 ============================
+//   Scope 是**进程级单例**（Scope::get()），记录到进程结束；clear() 用于丢开加载期数据。
+//   Rec::name 是 std::string（拷贝一份，调用方的临时字符串可以放心释放）。
+//   探针本身零分配开销：enabled()==false 时 begin/op 全是空转（只判断一个 bool）。
 #pragma once
 
 #include <algorithm>
@@ -371,15 +400,23 @@ public:
     OpGuard(const char* name, Phase ph, std::int64_t bytes) {
         auto& s = Scope::get();
         if (!s.enabled()) return;
-        r_ = &s.begin(name, ph, bytes);
+        // 只存**下标**，不存 Rec*：recs_ 是 std::vector，任何一次 push_back 扩容都会让
+        // 先前拿到的指针/引用失效（代码审查 P0）。下标在扩容后依然有效。
+        idx_ = s.recs().size();
+        s.begin(name, ph, bytes);
+        active_ = true;
     }
     ~OpGuard() {
-        if (r_) Scope::get().finish(*r_);
+        if (!active_) return;
+        auto& s = Scope::get();
+        if (idx_ < s.recs().size()) s.finish(s.recs()[idx_]);
     }
-    Rec* raw() const { return r_; }
+    std::size_t index() const { return idx_; }
+    bool        active() const { return active_; }
 
 private:
-    Rec* r_ = nullptr;
+    std::size_t idx_    = 0;
+    bool        active_ = false;
 };
 
 #define NOVA_SCOPE_CAT2(a, b) a##b

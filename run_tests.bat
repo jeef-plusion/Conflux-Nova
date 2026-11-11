@@ -2,7 +2,7 @@
 rem 全部验证：CPU 对拍 + 真卡 GEMV/RoPE/Attention + loader 正负例
 setlocal
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
-set PATH=E:\12\bin;%PATH%
+if defined CUDA_PATH (set "PATH=%CUDA_PATH%\bin;%PATH%") else (set "PATH=E:\12\bin;%PATH%")
 if not exist build mkdir build
 
 echo === CPU: Q4_K dequant / warp 分工 ===

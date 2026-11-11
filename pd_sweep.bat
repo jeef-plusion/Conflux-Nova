@@ -4,10 +4,10 @@ rem usage: pd_sweep.bat <PD>     (writes build\sycl\pd_<PD>.txt)
 setlocal
 set PD=%1
 rem 妯″瀷璺緞鍙互鐢ㄧ浜屼釜鍙傛暟瑕嗙洊锛堟ā鍨嬫尓杩囩洰褰曟椂涓嶇敤鏀硅剼鏈級
-if "%2"=="" (set MODEL=C:\nova\build\q4k_15b.gguf) else (set MODEL=%2)
+if "%2"=="" (set MODEL=%~dp0build\q4k_15b.gguf) else (set MODEL=%~2)
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" >nul 2>&1
-cd /d C:\nova
+cd /d "%~dp0"
 
 echo === build PD=%PD% ===
 icpx -fsycl -O3 -std=c++17 -fsycl-device-code-split=per_kernel ^

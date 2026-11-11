@@ -20,8 +20,8 @@ if not exist build mkdir build
 if not exist build\cudascope mkdir build\cudascope
 
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-if not exist "E:\12\bin\nvcc.exe" goto no_cuda
-set PATH=E:\12\bin;%PATH%
+
+if defined CUDA_PATH (set "PATH=%CUDA_PATH%\bin;%PATH%") else (set "PATH=E:\12\bin;%PATH%")
 
 echo [cudascope] nvcc sm_61 -D%MODEL%
 nvcc -std=c++17 -O3 -arch=sm_61 -Wno-deprecated-gpu-targets -Xcompiler /utf-8 ^

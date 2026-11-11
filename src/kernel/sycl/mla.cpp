@@ -127,6 +127,9 @@ public:
                     sycl::local_accessor<float, 1> sq, sycl::local_accessor<float, 1> sp)
         : q_(q), kc_(kc), vc_(vc), o_(o), n_keys_(n_keys), sq_(sq), sp_(sp) {}
 
+    // ⚠️ 必须固定 subgroup 宽度：本内核用 lane % 32 的切分 + sg_sum，若运行时选到 16/8 宽
+    // subgroup，会越界读 local 并对不齐归约 —— 静默算错、不崩（代码审查 P0）。
+    [[sycl::reqd_sub_group_size(32)]]
     void operator()(sycl::nd_item<1> it) const {
         const int head = static_cast<int>(it.get_group(0));
         const int tid  = static_cast<int>(it.get_local_id(0));

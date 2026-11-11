@@ -52,6 +52,13 @@ public:
     static constexpr int         kRetryMs    = 100;
 
     explicit DeviceArena(bool verbose = true) : verbose_(verbose) {}
+
+    // 禁止拷贝/移动：arena 拥有 chunk 所有权，拷贝一次就会 double free（代码审查 P0）。
+    DeviceArena(const DeviceArena&)            = delete;
+    DeviceArena& operator=(const DeviceArena&) = delete;
+    DeviceArena(DeviceArena&&)                 = delete;
+    DeviceArena& operator=(DeviceArena&&)      = delete;
+
     ~DeviceArena() {
         for (auto& c : chunks_) {
             if (!c.base) continue;

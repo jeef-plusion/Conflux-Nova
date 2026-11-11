@@ -1,19 +1,50 @@
-// code/graph/kv_pool.h — 共享 KV 块池（第 2 步：非连续寻址 / Paged Attention，仍无共享）
+// nova_v2/code/graph/kv_pool.h — 共享 KV 块池（paged 非连续寻址，第 2 步；无跨会话共享）
 //
-// 显存布局（两个池各一份，k 与 v 分池存放，等价于 [2] 维拆开）：
-//       pool: [layer][NB][KB][NKV][HD]
-//       NB  = kMaxSessions * nblocks        // 全局物理块数
-//       KB  = kKvBlock（16）                 // 每块 token 数
-//       KVW = NKV * HD                       // 每 token 的 float 数
-// 地址 = pool + ((layer * NB + phys) * KB + slot) * KVW
-//        slot = pos & (KB-1)，phys = table[pos >> kKvBlockShift]
+// ============================ 它解决什么问题 ============================
+// 每个会话的 KV 不再"预切一大片连续显存"，而是从**全卡共享的块池**里按块分配。
+// 这样 N 个会话的总显存 = L*NB*KB*KVW（与逐会话切片**一个字节都不差**），
+// 但地址不再连续 —— attention 必须按块表跳着读。第 3 步的会话共享 + COW 才能在此基础上做。
 //
-// 总量与改造前的逐会话切片完全相同（L*NB*KB*KVW == kMaxSessions*span），
-// 所以分配大小一个字节都没变，变的只有寻址：每会话一张块表，块表决定物理块号。
+// ============================ 显存布局（k 与 v 分池，等价于把 [2] 维拆开） ============================
+//     pool : [layer][NB][KB][NKV][HD]
+//     NB   = kMaxSessions * nblocks      全局物理块数         (kMaxSessions=4, nblocks=ctx/KB)
+//     KB   = kKvBlock                    每块容纳的 token 数   (16)
+//     KVW  = NKV * HD                    每 token 的 float 数  (1.5B: 2*128 = 256)
+//   地址 = pool + ((layer * NB + phys) * KB + slot) * KVW
+//          slot = pos & (KB-1)            ← KB 是 2 的幂，所以用掩码不用取模
+//          phys = table[pos >> kKvBlockShift]
 //
-// 第 1 步的恒等映射（table[b] = slice*nblocks + b）继续保留 —— 每片仍然独占，
-// 只是切片内的地址不再连续，attention 要按块跳。第 3 步才做共享挂载 + COW。
+// ============================ 核心参数（改之前先看清楚） ============================
+//   kKvBlock      ∈ {8,16,32,64}，必须是 2 的幂（寻址靠移位/掩码）；
+//                 改大 → 块内浪费变大（最后一个块用不满）；改小 → 块表变长、attention 跳更多次。
+//   kMaxSessions  并发会话数，决定池的总量（4 × 2048 token × 28 层 ≈ 448 MiB）。
+//   kMaxCtx       单会话上下文上限，必须是 kKvBlock 的整数倍，否则池会多出尾巴（有 static_assert 兜）。
+//   table[]       每会话一张 int32 表，长度 = nblocks，逻辑块 → 物理块。
+//                 第 1/2 步是恒等映射（table[b] = slice*nblocks + b），第 3 步才出现共享。
+//
+// ============================ 指针生命周期（谁分配、谁释放、活多久） ============================
+//   · k / v        指向 DeviceArena 里的池基址 + 本切片偏移。**活到 arena 析构**；
+//                  会话析构不释放它们（池是引擎级共享资源）。
+//   · table_dev    指向 arena 里的块表副本（每会话一段）。写入用 cudaMemcpyAsync（H2D），
+//                  生命周期同 arena；COW 时由 Engine::cow_guard 更新。
+//   · table        host 侧镜像（std::vector），只用于调试/断言，kernel 不读它。
+//
+// ============================ COW（第 3 步，当前只有骨架） ============================
+//   need_copy_from / need_copy_blk 是**一次性**信号：cow_slice() 判定"这个块被共享，
+//   写前要复制"，把源块号记在这里；Engine::cow_guard 拷完必须把它们清成 -1，
+//   否则下一次写入会重复拷贝（浪费带宽且可能覆盖新数据）。
+//
+// ============================ 边界检查 ============================
+//   · `(pos >> kKvBlockShift)` 必须 < nblocks：由 kv_nblocks() = kMaxCtx/kKvBlock 保证，
+//     而 pos < kMaxCtx 由调用方（Engine::decode / prefill）保证。
+//   · 池满时 cow_slice 返回 -2，cow_guard 直接 abort —— 宁可崩也不静默写坏别人的 KV。
+//
+// ============================ 硬件差异 ============================
+//   本文件是 **CUDA 线**的（共享块池 + 块表）。SYCL 线目前用**连续 KV**
+//   （code/model/sycl/runner.cpp 的 kvk_/kvv_，布局 [L][ctx][NKV*HD]），没有 paged 寻址 ——
+//   这是有意的里程碑切割（docs/SYCL_PORT.md §12.2），不要把两边的"KV 布局"当成同一个东西。
 #pragma once
+// 第 1 步的恒等映射（table[b] = slice*nblocks + b）继续保留 —— 每片仍然独占，
 #include <cstdint>
 #include <vector>
 #include <algorithm>

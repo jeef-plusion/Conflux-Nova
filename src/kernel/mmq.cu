@@ -15,7 +15,7 @@ __global__ void __launch_bounds__(256, 2)
 mmq_kernel(const block_q4_K* __restrict__ w, const int8_t* __restrict__ xq,
            const float* __restrict__ xd, float* __restrict__ out, int K, int R, int n_tokens) {
     __shared__ int4   sw[BI * 9];      // 64 行 × 144B
-    __shared__ int8_t sx[BJ * KC];     // 32 token × 256B
+    __shared__ __align__(16) int8_t sx[BJ * KC];   // 32 token × 256B；必须 16 对齐：下面按 int4 读
     __shared__ float  sd[BJ * 8];      // 激活 scale
     __shared__ int    ss[BJ * 8];      // 激活 int8 行和
 

@@ -4,7 +4,7 @@ setlocal
 if "%1"=="" (set MODEL=NOVA_MODEL_QWEN25_7B) else (set MODEL=%1)
 
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
-set PATH=E:\12\bin;%PATH%
+if defined CUDA_PATH (set "PATH=%CUDA_PATH%\bin;%PATH%") else (set "PATH=E:\12\bin;%PATH%")
 
 if not exist build mkdir build
 nvcc -std=c++17 -O3 -arch=sm_61 -Wno-deprecated-gpu-targets -Xcompiler /utf-8 ^

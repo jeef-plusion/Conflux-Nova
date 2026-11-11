@@ -161,8 +161,14 @@ inline constexpr int kSoAInFlight = syclb::kSyclSg / 8;
 inline constexpr int soa_np(int bpr) { return (bpr + kSoAInFlight - 1) / kSoAInFlight; }
 inline constexpr std::int64_t soa_qs_row_bytes(int bpr) { return static_cast<std::int64_t>(bpr) * 128; }
 // 每条 lane 的块头数补齐到 4 的倍数 —— 这样 blk*np_pad*16 一定 64 B 对齐，内核才能用
-// 一次 64 B 向量载入抓 4 个块头（§13.7 抢救方案的 1、2 两条）
+// 一次 64 B 向量载入抓 4 个块头
 inline constexpr int soa_np_pad(int bpr) { return (soa_np(bpr) + 3) & ~3; }
+
+// q4k_gemv_soa.cpp 对块头用 assume_aligned(...,64) —— 这是对编译器的**承诺**，
+// 行跨度必须是 64 的倍数，否则承诺为假（代码审查 P1）。这里把它变成编译错误。
+static_assert((soa_np_pad(1536 / 256) * kSoAInFlight * 16) % 64 == 0,
+              "SoA hdr 行跨度必须 64 B 对齐（assume_aligned 的承诺）");
+
 inline constexpr std::int64_t soa_hdr_row_bytes(int bpr) {
     return static_cast<std::int64_t>(soa_np_pad(bpr)) * kSoAInFlight * 16;
 }
