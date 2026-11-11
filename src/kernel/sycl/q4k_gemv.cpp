@@ -24,7 +24,14 @@ namespace {
 using block_q4_K = nova::block_q4_K;
 
 // 一个 lane 一次抓 16 B 权重；PD 决定同一条 lane 上有几个载入在飞（实际取 min(PD, NP)）。
+// 预取窗深度：同一条 lane 上有几个 16 B 载入在飞。4 是原来拍的值，实测 GEMV 只跑到
+// 34~38 GB/s（顺序读上限 61.38），怀疑 DRAM 延迟没被掩盖住，所以做成编译期可扫：
+//   icpx ... -DNOVA_SYCL_GEMV_PD=8
+#ifndef NOVA_SYCL_GEMV_PD
 inline constexpr int kPrefetchDepth = 4;
+#else
+inline constexpr int kPrefetchDepth = NOVA_SYCL_GEMV_PD;
+#endif
 
 inline sycl::vec<float, 2> load8f(const float* p) {
     sycl::vec<float, 2> v;
