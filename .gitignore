@@ -14,3 +14,10 @@ startup.log
 # 发行包里的二进制不进 git（走 GitHub Releases / release\assemble.bat）
 /release/*.exe
 /release/*.dll
+
+# 根目录别留 trace/截图产物
+/nova_trace*.json
+/nova_trace*.csv
+/*.png
+/e2e_pd_*.txt
+/e2e_progress.log
